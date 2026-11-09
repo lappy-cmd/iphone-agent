@@ -21,7 +21,7 @@ TICK_SECONDS = 30
 
 def build_agent(settings: Settings) -> Agent:
     """Wire real services; anything not configured is left as None and reported when used."""
-    from .geo import IPLocator, Nominatim
+    from .geo import CensusGeocoder, ChainGeocoder, IPLocator, Nominatim
 
     llm = gmail = github = None
     if settings.gemini_api_key:
@@ -35,7 +35,7 @@ def build_agent(settings: Settings) -> Agent:
             with open(settings.gmail_token_path, "w", encoding="utf-8") as fh:
                 fh.write(settings.gmail_token_json)
 
-        gmail = Gmail(settings.gmail_token_path, settings.my_email)
+        gmail = Gmail(settings.gmail_token_path, settings.my_email, settings.notify_email)
     if settings.github_token and settings.github_repo:
         from .github import GitHub
 
@@ -45,7 +45,7 @@ def build_agent(settings: Settings) -> Agent:
         DB(settings.db_path, turso_url=settings.turso_url, turso_token=settings.turso_token),
         llm=llm,
         gmail=gmail,
-        geocoder=Nominatim(),
+        geocoder=ChainGeocoder(CensusGeocoder(), Nominatim()),
         iplocator=IPLocator(),
         github=github,
     )

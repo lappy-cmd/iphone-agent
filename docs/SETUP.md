@@ -95,43 +95,49 @@ Updating the server later: push to GitHub and Render redeploys automatically. Yo
 
 ## 5. iPhone Shortcuts (the texting part)
 
-**Before you start:** add your Gmail account to Apple Mail (*Settings → Apps → Mail → Mail Accounts*). The email
-trigger only sees mail that arrives in the Mail app.
+Your **chat with yourself becomes the chat with the AI**: anything you text yourself goes to it, in plain
+words. No "agent:" needed. Every reply carries an invisible marker, so the server ignores its own
+replies when they show up in the same chat and nothing loops.
 
-### Automation A: "Agent In" (your texts → agent → reply in iMessage)
+**Before you start:** turn on **iCloud Mail** (*Settings → [your name] → iCloud → iCloud Mail*). If you never
+used it, iOS asks you to pick an `@icloud.com` address. Then, in Render → *Environment*, set
+`NOTIFY_EMAIL` to that address. Reminders and "done" messages go there. iCloud Mail is instant push on
+iPhone, while Gmail in Apple Mail is only checked every 15+ minutes.
+
+### Automation A: "Agent In" (your texts → AI → reply in iMessage)
 Shortcuts → **Automation** → **+** → **Message**
-- *Message Contains*: `agent:`
-- *Sender*: leave it as anyone, or choose yourself
+- *Sender*: **yourself** (pick your own contact card). Leave *Message Contains* empty.
 - Choose **Run Immediately** and turn off *Notify When Run*
 
 Actions:
 1. **Get Contents of URL**: `https://APP.onrender.com/message`
    - Method **POST**
-   - Headers: `X-Agent-Key` = your AGENT_KEY
-   - Request Body **JSON**: key `text` (Text) = **Shortcut Input** (tap it and choose the message *Content*)
-2. **Send Message**: *Message* = **Contents of URL**, *Recipients* = **your own number**
+   - Headers: key `X-Agent-Key` (literally), text = your AGENT_KEY
+   - Request Body **JSON**: key `text` (Text) = **Shortcut Input → Content**
+2. **Get Text from Input**: input = *Contents of URL*
+3. **If**: input = *Text*, condition **has any value**
+   - inside the If: **Send Message**: *Message* = **Text**, *Recipients* = **your own number**
+   - leave *Otherwise* empty (an empty reply means "this was my own message, send nothing")
 
 ### Automation B: "Agent Out" (reminders, digests, "location set" → iMessage)
 Shortcuts → **Automation** → **+** → **Email**
-- *Sender*: your Gmail address
+- *Account*: iCloud. *Sender*: your Gmail address
 - *Subject Contains*: `[agent]`
 - **Run Immediately**
 
 Actions:
-1. **Send Message**: *Message* = **Shortcut Input** (the email body), *Recipients* = **your own number**
+1. **Get Text from Input**: input = *Shortcut Input*
+2. **Send Message**: *Message* = **Text**, *Recipients* = **your own number**
 
-### Backup: "Ask Agent" shortcut (use this if Automation A doesn't fire)
-Create a regular shortcut: **Ask for Input** (Text) → **Get Contents of URL** (same as above, with `text` =
-*Provided Input*) → **Send Message** (Contents of URL → your number). Run it from Siri ("Hey Siri, Ask Agent"),
-the Action Button, or a home-screen icon.
+### Backup: "Ask Agent" shortcut (if Automation A ever stops firing)
+A regular shortcut: **Ask for Input** (Text) → **Get Contents of URL** (same as above, with `text` =
+*Provided Input*) → **Get Text from Input** → **Send Message** (Text → your number). Run it from Siri
+("Hey Siri, Ask Agent"), the Action Button, or a home-screen icon.
 
-### Test these first (this is where iOS can surprise you)
-1. Text yourself `agent: help`. Does Automation A fire? Some iOS versions don't count a message **you sent to
-   yourself** as "received". If it doesn't fire, use the *Ask Agent* shortcut instead. The server works either way.
-2. Run `curl -X POST https://APP.onrender.com/message -H "X-Agent-Key: KEY" -H "Content-Type: application/json" -d "{\"text\":\"agent: remind me test in 2 minutes\"}"`.
-   Two minutes later the reminder email should arrive and Automation B should text it to you. If the text
-   includes the whole email header instead of just the body, add a **Get Text from Input** step before
-   *Send Message*.
+### Test it
+1. Text yourself `hey, what can you do?`. A reply should arrive in the same chat, and **only one**.
+   You'll see each message twice (sent + received); that's how iMessage shows texts to yourself.
+2. Text `remind me to test this in 2 minutes`. Two minutes later the reminder should arrive as a text.
 
 ## 6. Laptop location helper (Windows)
 
@@ -161,15 +167,60 @@ demo.** Restarting the phone also clears any fake location.
 ## 7. VPN (IP-location demo)
 
 Install **Proton VPN** from the App Store. Its free plan is the one to use: no data cap, and it doesn't sell
-browsing data. Text `agent: where am i` with the VPN off, then on, and compare the IP locations.
+browsing data. Text `where am i?` with the VPN off, then on, and compare the IP locations.
 
 ## 8. Pre-presentation checklist
 
 - [ ] `https://APP.onrender.com/health` shows `"helper_online": true` (helper running, phone plugged in)
-- [ ] `agent: help` → a reply arrives in iMessage
-- [ ] `agent: put me at <a test address>` → confirm with `agent: yes` → a "Location set" text arrives
+- [ ] Text yourself anything → exactly one reply arrives
+- [ ] `put me at <a test address>` → it tells you what it found → `yes` → it confirms the move
 - [ ] **Find My** (on another device or icloud.com/find) shows the new spot
-- [ ] `agent: real location` → "Real location restored", and Find My is back to normal
-- [ ] `agent: where am i` with the VPN off and then on shows different IP locations
-- [ ] `agent: summarize my email` and `agent: remind me test in 5 minutes` work
+- [ ] `give me my real location back` → it confirms, and Find My is back to normal
+- [ ] `where am i?` with the VPN off and then on shows different IP locations
+- [ ] `what's in my email?` and `remind me to test in 5 minutes` work
 - [ ] Afterwards: stop the helper and turn Developer Mode off
+
+## 9. Experimental: change location from anywhere (Tailscale VPN)
+
+This tries to let the laptop at home reach the phone while you're out, so the agent can move the location
+without a cable. **It may not work.** The laptop finds the phone with Bonjour (local-network discovery),
+which normally doesn't cross a VPN, and Apple may only allow these developer connections on the local
+network. Steps 1–3 work on their own (Wi-Fi at home), so do them first.
+
+1. **Let Windows discover devices on your home Wi-Fi.** In an *Administrator* PowerShell:
+   ```powershell
+   Set-NetConnectionProfile -InterfaceAlias "Wi-Fi" -NetworkCategory Private
+   ```
+2. **Allow the phone over Wi-Fi.** With the phone plugged in and unlocked:
+   ```powershell
+   cd iphone-agent\helper
+   .\.venv\Scripts\python -m pymobiledevice3 lockdown wifi-connections on
+   ```
+3. **Test at home over Wi-Fi.** Phone and laptop on the same Wi-Fi, phone unplugged and awake. Start the
+   tunnel (Administrator window), then check that the phone shows up under `"wifi"`:
+   ```powershell
+   .\.venv\Scripts\python -m pymobiledevice3 remote tunneld
+   # in a normal window:
+   .\.venv\Scripts\python -m pymobiledevice3 remote browse --timeout 8
+   ```
+   If it shows up, start the helper through the tunnel by setting your phone's UDID first (find it with
+   `pymobiledevice3 usbmux list` while plugged in):
+   ```powershell
+   $env:PYMOBILEDEVICE3_TUNNEL = "YOUR-PHONE-UDID"
+   .\.venv\Scripts\python location_helper.py --server https://APP.onrender.com --key HELPER_KEY
+   ```
+   Text a location change. If it works, you're cable-free at home.
+4. **Install Tailscale** (free) on the laptop (tailscale.com/download) and the iPhone (App Store). Sign in
+   to the **same account** on both, and turn on the VPN on the phone.
+5. **Keep the laptop awake 24/7** when it's plugged into power:
+   ```powershell
+   powercfg /change standby-timeout-ac 0
+   powercfg /change hibernate-timeout-ac 0
+   ```
+   Leave it on, with the tunnel and helper windows open.
+6. **Test away from home.** Switch the phone to cellular (Wi-Fi off), keep Tailscale on, wait a minute,
+   then run `remote browse` on the laptop again (or just text a location change).
+   - **The phone shows up under "wifi" and the change works:** it works from anywhere, as long as the
+     laptop stays on and both stay connected to Tailscale.
+   - **It doesn't show up:** discovery doesn't cross the VPN. Connecting directly to the phone's
+     Tailscale address would need extra code, and Apple may still refuse the connection.

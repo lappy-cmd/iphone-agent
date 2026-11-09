@@ -28,29 +28,43 @@ class Clock:
 
 
 class FakeLLM:
+    """Scripted stand-in for Gemini. Queue a turn with .turn(("call", name, args), ..., ("say", text))."""
+
     def __init__(self):
         self.fail = False
-        self.reminder = None  # {"task", "due_local"}
+        self.turns = []  # list of step lists, one per converse() call
+        self.systems = []
+        self.histories = []
+        self.results = []  # tool results seen, in order
+        self.style_calls = []
 
     def _check(self):
         if self.fail:
             raise LLMError("429 quota")
 
-    def chat(self, text):
+    def turn(self, *steps):
+        self.turns.append(list(steps))
+
+    def converse(self, system, history, tools, call_tool):
         self._check()
-        return f"answer to: {text}"
+        self.systems.append(system)
+        self.histories.append(history)
+        steps = self.turns.pop(0) if self.turns else [("say", f"answer to: {history[-1]['text']}")]
+        for step in steps:
+            if step[0] == "call":
+                self.results.append(call_tool(step[1], dict(step[2])))
+            else:
+                return step[1]
+        return "ok"
 
     def summarize_emails(self, emails):
         self._check()
         return f"{len(emails)} emails summarized"
 
-    def draft_email(self, to, instruction):
+    def style_profile(self, user_messages, previous):
         self._check()
-        return {"subject": "Hi", "body": f"Body: {instruction}"}
-
-    def parse_reminder(self, text, now_local):
-        self._check()
-        return self.reminder
+        self.style_calls.append(list(user_messages))
+        return "short lowercase texts, no emoji"
 
     def generate_code(self, request):
         self._check()
@@ -180,6 +194,7 @@ def agent(request, settings, clock):
         github=FakeGitHub(),
         clock=clock,
         background=lambda fn: fn(),  # run "background" work inline
+        sleep=lambda seconds: None,  # tests drive the laptop helper explicitly
     )
 
 

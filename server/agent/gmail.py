@@ -20,9 +20,10 @@ class GmailError(Exception):
 
 
 class Gmail:
-    def __init__(self, token_path: str, my_email: str):
+    def __init__(self, token_path: str, my_email: str, notify_to: str = ""):
         self._token_path = token_path
         self._my_email = my_email
+        self._notify_to = notify_to or my_email
         self._service = None
 
     def _svc(self):
@@ -98,4 +99,4 @@ class Gmail:
     def notify_self(self, text: str) -> None:
         """Email yourself; the iPhone 'Agent Out' automation turns it into an iMessage."""
         first_line = text.splitlines()[0][:60] if text else ""
-        self.send(self._my_email, f"{NOTIFY_SUBJECT_PREFIX} {first_line}", text)
+        self.send(self._notify_to, f"{NOTIFY_SUBJECT_PREFIX} {first_line}", text)

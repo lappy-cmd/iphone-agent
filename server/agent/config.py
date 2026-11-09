@@ -23,6 +23,7 @@ class Settings:
     agent_key: str = ""
     helper_key: str = ""
     my_email: str = ""
+    notify_email: str = ""  # where reminder/status emails go (an @icloud.com address is push); default my_email
     timezone: str = "America/Los_Angeles"
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.5-flash"
@@ -37,6 +38,9 @@ class Settings:
     heads_up_hours: int = 24  # 0 disables day-before heads-up
     confirm_ttl_minutes: int = 10
     helper_offline_seconds: int = 30
+    location_wait_seconds: int = 20  # wait this long for the laptop before replying inline
+    history_messages: int = 20  # conversation turns the AI sees
+    style_every: int = 10  # refresh the "how you text" profile every N messages
 
     @classmethod
     def from_env(cls, env_file: str | Path | None = None) -> "Settings":
@@ -48,6 +52,7 @@ class Settings:
             agent_key=e("AGENT_KEY", ""),
             helper_key=e("HELPER_KEY", ""),
             my_email=e("MY_EMAIL", ""),
+            notify_email=e("NOTIFY_EMAIL", ""),
             timezone=e("TIMEZONE", "America/Los_Angeles"),
             gemini_api_key=e("GEMINI_API_KEY", ""),
             gemini_model=e("GEMINI_MODEL", "gemini-2.5-flash"),

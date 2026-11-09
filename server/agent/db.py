@@ -42,7 +42,14 @@ CREATE TABLE IF NOT EXISTS kv (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    role TEXT NOT NULL,  -- user | model
+    text TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 """
+KEEP_MESSAGES = 200
 
 
 def _iso(dt: datetime) -> str:
@@ -229,6 +236,13 @@ class DB:
             (kind, json.dumps(payload), _iso(expires_at)),
         )
 
+    def peek_pending(self, now: datetime) -> dict | None:
+        """The pending action without clearing it, or None if absent/expired."""
+        rows = self._all("SELECT * FROM pending WHERE slot = 1")
+        if not rows or _dt(rows[0]["expires_at"]) < now:
+            return None
+        return {"kind": rows[0]["kind"], "payload": json.loads(rows[0]["payload"])}
+
     def pop_pending(self, now: datetime) -> dict | None:
         """Return and clear the pending action, or None if absent/expired."""
         rows = self._all("SELECT * FROM pending WHERE slot = 1")
@@ -264,6 +278,10 @@ class DB:
         rows = self._all("SELECT created_at FROM helper_commands WHERE id = ?", (cid,))
         return _dt(rows[0]["created_at"])
 
+    def get_helper_command(self, cid: int) -> dict | None:
+        rows = self._all("SELECT status, detail FROM helper_commands WHERE id = ?", (cid,))
+        return {"status": rows[0]["status"], "detail": rows[0]["detail"] or ""} if rows else None
+
     def finish_helper_command(self, cid: int, ok: bool, detail: str) -> dict | None:
         rows = self._all("SELECT * FROM helper_commands WHERE id = ?", (cid,))
         if not rows:
@@ -274,3 +292,18 @@ class DB:
         )
         r = rows[0]
         return {"id": r["id"], "action": r["action"], "payload": json.loads(r["payload"])}
+
+    # ---- conversation memory ----
+    def add_message(self, role: str, text: str, now: datetime) -> None:
+        cur = self._exec(
+            "INSERT INTO messages(role, text, created_at) VALUES(?, ?, ?)", (role, text, _iso(now))
+        )
+        if cur.lastrowid and cur.lastrowid % 50 == 0:
+            self._exec("DELETE FROM messages WHERE id <= ?", (cur.lastrowid - KEEP_MESSAGES,))
+
+    def recent_messages(self, limit: int, role: str | None = None) -> list[dict]:
+        where, args = ("WHERE role = ? ", (role, limit)) if role else ("", (limit,))
+        rows = self._all(
+            f"SELECT role, text FROM messages {where}ORDER BY id DESC LIMIT ?", args
+        )
+        return [{"role": r["role"], "text": r["text"]} for r in reversed(rows)]

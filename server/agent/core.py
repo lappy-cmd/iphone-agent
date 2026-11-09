@@ -1,9 +1,10 @@
-"""The agent: routes texted commands to handlers, runs scheduled jobs, talks to the laptop helper."""
+"""The agent: a Gemini conversation with tools, scheduled jobs, and the laptop helper queue."""
 from __future__ import annotations
 
 import logging
 import re
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 from zoneinfo import ZoneInfo
@@ -14,49 +15,21 @@ from .geo import GeoError, parse_coordinates
 from .github import GitHubError
 from .gmail import GmailAuthError, GmailError
 from .llm import LLMError
+from .persona import TOOLS, is_ours, mark, system_prompt
 
 log = logging.getLogger("agent")
 
-PREFIX = "🤖 "
 HELPER_COMMAND_MAX_AGE = timedelta(minutes=2)
 DIGEST_WINDOW = timedelta(hours=2)
 EXACT_PLACE_KINDS = {"house", "building", "residential", "apartments", "house_number", "place"}
+RE_PREFIX = re.compile(r"^\s*agent\s*[:\-,]?\s*", re.IGNORECASE)  # old habit; harmless to strip
+RE_EMAIL_ADDR = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+STYLE_SAMPLE = 30
 
-HELP = """Commands (start each with "agent:"):
-put me at <address | lat, lon | maps link>
-real location
-where am i
-summarize my email
-email <address> saying <what to say>
-remind me <task> <when>
-reminders / cancel reminder <id>
-make me an agent that <does something>
-yes / no (confirm the pending action)
-Anything else = ask me a question."""
-
-_R = lambda p: re.compile(p, re.IGNORECASE | re.DOTALL)  # noqa: E731
-RE_PREFIX = _R(r"^\s*agent\s*[:\-,]?\s*")
-RE_YES = _R(r"^(yes|y|yep|yeah|confirm|send it|do it|ok|okay)[.!]*$")
-RE_NO = _R(r"^(no|n|nope|cancel|stop|don'?t)[.!]*$")
-RE_HELP = _R(r"^(help|commands|\?)$")
-RE_CLEAR_LOC = _R(r"^((my )?(real|actual|true) location|(clear|reset|stop) (my )?(fake )?location)[.!]*$")
-RE_WHERE = _R(r"^where am i\??$")
-RE_SET_LOC = _R(r"^(?:put|set|move|send|teleport|place) me (?:at|to|in) (.+)$|^set (?:my )?location (?:to |at )?(.+)$")
-RE_SUMMARY = _R(r"^(summari[sz]e|check|read|go through)\b.*\b(e-?mails?|inbox|mail)\b")
-RE_EMAIL = _R(r"^(?:send )?(?:an )?e-?mail (?:to )?(\S+@\S+?)[,:]? (?:saying|that says|that|about|to say|telling (?:them|him|her))\s*(.+)$")
-RE_REMIND = _R(r"^remind me (?:to |about |that )?(.+)$")
-RE_LIST_REM = _R(r"^((list|show) (my )?)?reminders\??$")
-RE_CANCEL_REM = _R(r"^(?:cancel|delete|remove) reminder #?(\d+)$")
-RE_CODE = _R(r"^(?:make|build|create|write|generate|code)\b.*\b(agent|bot|script|program|app|code|tool|website|site|function|game)\b")
-
-
-ZWSP = "​"  # zero-width space: looks like "agent:" but doesn't match "contains agent:"
-
-
-def sanitize(text: str) -> str:
-    """Prefix replies and make sure they can never re-trigger the 'agent:' automation."""
-    text = re.sub(r"(?i)(agent)\s*:", lambda m: m.group(1) + ZWSP + ":", text.strip())
-    return text if text.startswith(PREFIX) else PREFIX + text
+NO_BRAIN = (
+    "Sorry, my AI brain is unavailable right now (Gemini's free daily limit or an outage). "
+    "Try again in a bit."
+)
 
 
 def utcnow() -> datetime:
@@ -79,6 +52,7 @@ class Agent:
         github=None,
         clock: Callable[[], datetime] = utcnow,
         background: Callable[[Callable[[], None]], None] = _threaded,
+        sleep: Callable[[float], None] = time.sleep,
     ):
         self.s = settings
         self.db = db
@@ -89,7 +63,10 @@ class Agent:
         self.github = github
         self.clock = clock
         self.background = background
+        self.sleep = sleep
         self.tz = ZoneInfo(settings.timezone)
+        self._lock = threading.Lock()
+        self._awaiting: set[int] = set()  # helper commands a /message request is waiting on
 
     # ------------------------------------------------------------------ helpers
     def now(self) -> datetime:
@@ -104,12 +81,12 @@ class Agent:
         return f"{loc:%a %b} {loc.day} {loc.strftime('%I:%M %p').lstrip('0')}"
 
     def notify(self, text: str) -> None:
-        """Proactive text: email to self -> iPhone automation -> iMessage."""
+        """Proactive text: email -> iPhone 'Agent Out' automation -> iMessage."""
         if self.gmail is None:
             log.warning("notify without gmail: %s", text)
             return
         try:
-            self.gmail.notify_self(sanitize(text))
+            self.gmail.notify_self(mark(text))
         except Exception:  # never let a notification failure kill the scheduler
             log.exception("notify failed")
 
@@ -123,236 +100,250 @@ class Agent:
 
     # ------------------------------------------------------------------ entry point
     def handle(self, raw: str, client_ip: str | None = None) -> str:
+        """One incoming text -> one reply ('' means: send nothing)."""
+        if is_ours(raw):
+            return ""  # our own reply/notification echoing back through the self-chat
         text = RE_PREFIX.sub("", raw or "", count=1).strip()
+        if not text:
+            return ""
+        if self.llm is None:
+            return mark("My AI brain isn't set up yet (GEMINI_API_KEY is missing on the server).")
+
+        turn = int(self.db.get("turn", 0)) + 1
+        self.db.set("turn", turn)
+        self.db.add_message("user", text, self.now())
+        ctx = {"turn": turn, "client_ip": client_ip}
         try:
-            return sanitize(self._route(text, client_ip))
+            reply = self.llm.converse(
+                self._system(),
+                self.db.recent_messages(self.s.history_messages),
+                TOOLS,
+                lambda name, args: self._run_tool(name, args, ctx),
+            )
         except LLMError as exc:
             log.warning("gemini error: %s", exc)
-            return sanitize("Gemini is unavailable or the free daily limit was hit. Try again later.")
+            return mark(NO_BRAIN)
+        self.db.add_message("model", reply, self.now())
+        self._maybe_learn_style()
+        return mark(reply)
+
+    def _system(self) -> str:
+        pending = self.db.peek_pending(self.now())
+        if pending:
+            pending = {"kind": pending["kind"], "summary": pending["payload"].get("summary", "")}
+        return system_prompt(
+            now_local=self.local(self.now()).strftime("%A %Y-%m-%d %H:%M"),
+            timezone=self.s.timezone,
+            helper_online=self.helper_online(),
+            pending=pending,
+            style=self.db.get("style_profile", ""),
+        )
+
+    def _maybe_learn_style(self) -> None:
+        count = int(self.db.get("style_count", 0)) + 1
+        self.db.set("style_count", count)
+        if count % self.s.style_every:
+            return
+        llm = self.llm
+
+        def work() -> None:
+            try:
+                msgs = [m["text"] for m in self.db.recent_messages(STYLE_SAMPLE, role="user")]
+                profile = llm.style_profile(msgs, self.db.get("style_profile", ""))
+                self.db.set("style_profile", profile.strip()[:800])
+            except Exception as exc:
+                log.warning("style update failed: %s", exc)
+
+        self.background(work)
+
+    # ------------------------------------------------------------------ tools
+    def _run_tool(self, name: str, args: dict, ctx: dict) -> dict:
+        fn = getattr(self, f"_tool_{name}", None)
+        if fn is None:
+            return {"error": f"unknown tool {name}"}
+        log.info("tool %s %s", name, {k: v for k, v in args.items() if k != "body"})
+        try:
+            return fn(ctx, **args)
+        except TypeError as exc:
+            return {"error": f"bad arguments: {exc}"}
         except GmailAuthError:
-            return sanitize("Gmail sign-in expired. Re-run scripts/gmail_auth.py and copy token.json to the server.")
-        except (GmailError, GeoError, GitHubError) as exc:
-            return sanitize(f"That failed: {exc}")
+            return {
+                "error": "Gmail sign-in expired. The owner needs to re-run scripts/gmail_auth.py "
+                "and paste the new token.json into GMAIL_TOKEN_JSON on Render."
+            }
+        except (GmailError, GeoError, GitHubError, LLMError) as exc:
+            return {"error": str(exc)}
         except Exception as exc:
-            log.exception("handler crashed")
-            return sanitize(f"Something broke ({type(exc).__name__}): {exc}")
+            log.exception("tool %s crashed", name)
+            return {"error": f"{type(exc).__name__}: {exc}"}
 
-    def _route(self, text: str, client_ip: str | None) -> str:
-        if not text or RE_HELP.match(text):
-            return HELP
-        if RE_YES.match(text):
-            return self._confirm(True)
-        if RE_NO.match(text):
-            return self._confirm(False)
-        if RE_CLEAR_LOC.match(text):
-            return self._clear_location()
-        if RE_WHERE.match(text):
-            return self._where(client_ip)
-        if m := RE_SET_LOC.match(text):
-            return self._set_location((m.group(1) or m.group(2)).strip())
-        if RE_SUMMARY.match(text):
-            return self._summary()
-        if m := RE_EMAIL.match(text):
-            return self._email(m.group(1), m.group(2).strip())
-        if RE_LIST_REM.match(text):
-            return self._list_reminders()
-        if m := RE_CANCEL_REM.match(text):
-            return self._cancel_reminder(int(m.group(1)))
-        if m := RE_REMIND.match(text):
-            return self._remind(m.group(1).strip())
-        if RE_CODE.match(text):
-            return self._codegen(text)
-        return self._require(self.llm, "Gemini").chat(text)
+    def _helper_offline(self) -> dict:
+        return {
+            "error": "The laptop helper is offline, so the location can't change. Turn on the "
+            "laptop, plug in the phone, and start the tunnel and location_helper.py."
+        }
 
-    @staticmethod
-    def _require(service, name: str):
-        if service is None:
-            raise RuntimeError(f"{name} is not configured on the server")
-        return service
+    def _prepare(self, kind: str, payload: dict, ctx: dict) -> None:
+        payload = {**payload, "turn": ctx["turn"]}
+        self.db.set_pending(kind, payload, self.now() + timedelta(minutes=self.s.confirm_ttl_minutes))
 
-    # ------------------------------------------------------------------ confirmations
-    def _ask_confirm(self, kind: str, payload: dict) -> None:
-        self.db.set_pending(
-            kind, payload, self.now() + timedelta(minutes=self.s.confirm_ttl_minutes)
-        )
-
-    def _confirm(self, yes: bool) -> str:
-        pending = self.db.pop_pending(self.now())
-        if pending is None:
-            return "Nothing is waiting for confirmation (confirmations expire after %d min)." % (
-                self.s.confirm_ttl_minutes
-            )
-        if not yes:
-            return "Cancelled."
-        p = pending["payload"]
-        if pending["kind"] == "email":
-            self._require(self.gmail, "Gmail").send(p["to"], p["subject"], p["body"])
-            return f"Sent to {p['to']}."
-        if pending["kind"] == "location":
-            if not self.helper_online():
-                return self._helper_offline_msg()
-            self.db.queue_helper_command("set", p, self.now())
-            return f"Moving your phone to {p['label']}... I'll text you when it's set."
-        return "Unknown pending action; cancelled."
-
-    # ------------------------------------------------------------------ location
-    def _helper_offline_msg(self) -> str:
-        return (
-            "Laptop helper is offline, so I can't change your location. Turn on the laptop, "
-            "plug in / pair your phone, and start location_helper.py."
-        )
-
-    def _set_location(self, place: str) -> str:
+    # ---- location
+    def _tool_set_location(self, ctx: dict, place: str) -> dict:
         coords = parse_coordinates(place)
-        warning = ""
+        approximate = None
         if coords:
             lat, lon = coords
             label = f"{lat:.6f}, {lon:.6f}"
         else:
-            hit = self._require(self.geocoder, "Geocoder").lookup(place)
+            if self.geocoder is None:
+                return {"error": "no geocoder configured"}
+            hit = self.geocoder.lookup(place)
             if hit is None:
-                return (
-                    f"Couldn't find \"{place}\". Send exact coordinates instead: long-press the spot "
-                    "in Apple/Google Maps, copy the coordinates or share link, and text "
-                    "\"agent: put me at <that>\"."
-                )
+                return {
+                    "error": f"Couldn't find '{place}'. For an exact spot, the user can long-press "
+                    "it in Apple/Google Maps and send the coordinates or the share link."
+                }
             lat, lon, label = hit["lat"], hit["lon"], hit["label"]
             if hit.get("kind") and hit["kind"] not in EXACT_PLACE_KINDS:
-                warning = (
-                    f"\nNote: this matched a {hit['kind']}, not an exact house. For the exact spot, "
-                    "send a maps pin or coordinates."
+                approximate = (
+                    f"This matched a {hit['kind']}, not an exact building, so it may be off. "
+                    "Coordinates or a maps pin are exact."
                 )
         if not self.helper_online():
-            return self._helper_offline_msg()
-        self._ask_confirm("location", {"lat": lat, "lon": lon, "label": label})
-        return (
-            f"Found: {label}\n({lat:.6f}, {lon:.6f}){warning}\n"
-            f"Set your location there? Reply \"agent: yes\" or \"agent: no\"."
-        )
+            return self._helper_offline()
+        self._prepare("location", {"lat": lat, "lon": lon, "label": label, "summary": label}, ctx)
+        out = {"status": "prepared, ask the user to confirm", "place": label, "lat": lat, "lon": lon}
+        if approximate:
+            out["warning"] = approximate
+        return out
 
-    def _clear_location(self) -> str:
+    def _tool_clear_location(self, ctx: dict) -> dict:
         if not self.helper_online():
-            return self._helper_offline_msg()
-        self.db.queue_helper_command("clear", {}, self.now())
-        return "Restoring your real location... I'll text you when it's done."
+            return self._helper_offline()
+        return self._run_helper("clear", {})
 
-    def _where(self, client_ip: str | None) -> str:
+    def _run_helper(self, action: str, payload: dict) -> dict:
+        """Queue a laptop command and wait briefly so the reply can say how it went."""
+        cid = self.db.queue_helper_command(action, payload, self.now())
+        with self._lock:
+            self._awaiting.add(cid)
+        for _ in range(max(self.s.location_wait_seconds, 0)):
+            self.sleep(1)
+            cmd = self.db.get_helper_command(cid)
+            if cmd and cmd["status"] in ("done", "failed"):
+                break
+        with self._lock:
+            self._awaiting.discard(cid)
+            cmd = self.db.get_helper_command(cid) or {"status": "queued", "detail": ""}
+        if cmd["status"] == "done":
+            return {"status": "done", "place": payload.get("label", "real location")}
+        if cmd["status"] == "failed":
+            return {"status": "failed", "detail": cmd["detail"]}
+        return {
+            "status": "still working",
+            "note": "The laptop is taking longer than usual; the user gets a text when it's done.",
+        }
+
+    def _tool_where_am_i(self, ctx: dict) -> dict:
         last = self.db.get("last_location")
-        lines = [
-            f"Phone location set by me: {last['label']} ({last['lat']:.5f}, {last['lon']:.5f})"
-            if last
-            else "Phone location: real (I haven't set a fake one)."
-        ]
-        if client_ip and self.iplocator:
-            info = self.iplocator.locate(client_ip)
-            if info:
-                lines.append(
-                    f"Your IP location: {info.get('city')}, {info.get('regionName')}, "
-                    f"{info.get('country')} (IP {info.get('query')}, {info.get('isp')})"
-                )
-            else:
-                lines.append(f"Your IP ({client_ip}) couldn't be located.")
-        lines.append("Turn Proton VPN on/off and ask again to compare.")
-        return "\n".join(lines)
+        out: dict = {
+            "fake_location": (
+                {"place": last["label"], "lat": last["lat"], "lon": last["lon"]} if last else None
+            ),
+            "note": "fake_location null means the phone shows its real location.",
+        }
+        ip = ctx.get("client_ip")
+        if ip and self.iplocator:
+            info = self.iplocator.locate(ip)
+            out["ip_location"] = (
+                {k: info.get(k) for k in ("city", "regionName", "country", "isp", "query")}
+                if info
+                else f"IP {ip} couldn't be located"
+            )
+        return out
 
-    # ---- laptop helper API ----
-    def helper_poll(self) -> dict | None:
-        self.db.set("helper_last_seen", self.now().isoformat())
-        while (cmd := self.db.next_helper_command()) is not None:
-            created = self.db.helper_command_created(cmd["id"])
-            if self.now() - created > HELPER_COMMAND_MAX_AGE:
-                self.db.finish_helper_command(cmd["id"], False, "expired before helper picked it up")
-                continue
-            return cmd
-        return None
+    # ---- email
+    def _tool_check_email(self, ctx: dict) -> dict:
+        if self.gmail is None:
+            return {"error": "Gmail isn't configured on the server"}
+        emails = self.gmail.recent()[:15]
+        return {
+            "emails": [
+                {k: e.get(k) for k in ("from", "subject", "date", "snippet", "unread")}
+                for e in emails
+            ]
+        }
 
-    def helper_result(self, cid: int, ok: bool, detail: str) -> None:
-        cmd = self.db.finish_helper_command(cid, ok, detail)
-        if cmd is None:
-            return
-        if cmd["action"] == "set":
-            if ok:
-                self.db.set("last_location", cmd["payload"])
-                self.notify(f"Location set: {cmd['payload']['label']}. Check Find My to see it.")
-            else:
-                self.notify(f"Couldn't set location: {detail}")
-        elif cmd["action"] == "clear":
-            if ok:
-                self.db.set("last_location", None)
-                self.notify("Real location restored.")
-            else:
-                self.notify(f"Couldn't clear location: {detail}. Restarting the phone also clears it.")
-
-    # ------------------------------------------------------------------ email
-    def _summary(self) -> str:
-        emails = self._require(self.gmail, "Gmail").recent()
-        return self._require(self.llm, "Gemini").summarize_emails(emails)
-
-    def _email(self, to: str, instruction: str) -> str:
-        draft = self._require(self.llm, "Gemini").draft_email(to, instruction)
-        self._ask_confirm("email", {"to": to, **draft})
-        return (
-            f"Draft to {to}\nSubject: {draft['subject']}\n\n{draft['body']}\n\n"
-            f"Send it? Reply \"agent: yes\" or \"agent: no\"."
+    def _tool_draft_email(self, ctx: dict, to: str, subject: str, body: str) -> dict:
+        to = to.strip()
+        if not RE_EMAIL_ADDR.match(to):
+            return {"error": f"'{to}' isn't an email address. Ask the user for it."}
+        if self.gmail is None:
+            return {"error": "Gmail isn't configured on the server"}
+        self._prepare(
+            "email", {"to": to, "subject": subject, "body": body, "summary": f"email to {to}"}, ctx
         )
+        return {"status": "prepared, show the draft and ask the user to confirm"}
 
-    # ------------------------------------------------------------------ reminders
-    def _parse_when(self, text: str) -> tuple[str, datetime]:
-        now_local = self.local(self.now())
+    # ---- confirmations (enforced here, not just by the prompt)
+    def _tool_confirm_pending(self, ctx: dict) -> dict:
+        pending = self.db.peek_pending(self.now())
+        if pending is None:
+            return {"error": "Nothing is waiting for confirmation (it may have expired)."}
+        p = pending["payload"]
+        if p.get("turn") == ctx["turn"]:
+            return {
+                "error": "Not confirmed yet. Show the user the details and ask; they must agree in "
+                "their next message."
+            }
+        self.db.pop_pending(self.now())
+        if pending["kind"] == "email":
+            self.gmail.send(p["to"], p["subject"], p["body"])
+            return {"status": "sent", "to": p["to"]}
+        if pending["kind"] == "location":
+            if not self.helper_online():
+                return self._helper_offline()
+            return self._run_helper("set", {"lat": p["lat"], "lon": p["lon"], "label": p["label"]})
+        return {"error": "unknown pending action"}
+
+    def _tool_cancel_pending(self, ctx: dict) -> dict:
+        return {"status": "cancelled" if self.db.pop_pending(self.now()) else "nothing was pending"}
+
+    # ---- reminders
+    def _tool_add_reminder(self, ctx: dict, task: str, due_local: str) -> dict:
         try:
-            parsed = self._require(self.llm, "Gemini").parse_reminder(text, now_local)
-            task, due_local = parsed["task"], parsed["due_local"]
-        except (LLMError, RuntimeError):
-            task, due_local = self._dateparser_fallback(text, now_local)
-        if due_local.tzinfo is None:
-            due_local = due_local.replace(tzinfo=self.tz)
-        return task, due_local.astimezone(timezone.utc)
-
-    def _dateparser_fallback(self, text: str, now_local: datetime) -> tuple[str, datetime]:
-        from dateparser.search import search_dates
-
-        found = search_dates(
-            text,
-            settings={
-                "PREFER_DATES_FROM": "future",
-                "RELATIVE_BASE": now_local.replace(tzinfo=None),
-            },
-        )
-        if not found:
-            raise ValueError("no date found")
-        phrase, when = found[-1]
-        task = text.replace(phrase, "").strip(" ,.-") or text
-        return task, when
-
-    def _remind(self, text: str) -> str:
-        try:
-            task, due = self._parse_when(text)
+            due = datetime.fromisoformat(due_local.strip())
         except ValueError:
-            return 'I couldn\'t tell when. Try: "agent: remind me bio essay Friday 9am".'
+            return {"error": "due_local must look like YYYY-MM-DDTHH:MM"}
+        if due.tzinfo is None:
+            due = due.replace(tzinfo=self.tz)
+        due = due.astimezone(timezone.utc)
         now = self.now()
         if due <= now:
-            return f"That time ({self.fmt(due)}) is already past. Give me a future time."
+            return {"error": f"{self.fmt(due)} is already in the past"}
         heads_up = None
         if self.s.heads_up_hours and due - now > timedelta(hours=self.s.heads_up_hours):
             heads_up = due - timedelta(hours=self.s.heads_up_hours)
         rid = self.db.add_reminder(task, due, heads_up)
-        extra = f" (heads-up {self.fmt(heads_up)})" if heads_up else ""
-        return f"Reminder #{rid} set: {task}, {self.fmt(due)}{extra}."
+        out = {"id": rid, "task": task, "due": self.fmt(due)}
+        if heads_up:
+            out["heads_up"] = self.fmt(heads_up)
+        return out
 
-    def _list_reminders(self) -> str:
-        items = self.db.upcoming_reminders()
-        if not items:
-            return "No upcoming reminders."
-        return "Upcoming:\n" + "\n".join(
-            f"#{r['id']} {self.fmt(r['due_at'])}: {r['text']}" for r in items
-        )
+    def _tool_list_reminders(self, ctx: dict) -> dict:
+        return {
+            "reminders": [
+                {"id": r["id"], "task": r["text"], "due": self.fmt(r["due_at"])}
+                for r in self.db.upcoming_reminders()
+            ]
+        }
 
-    def _cancel_reminder(self, rid: int) -> str:
-        return f"Reminder #{rid} cancelled." if self.db.delete_reminder(rid) else f"No upcoming reminder #{rid}."
+    def _tool_cancel_reminder(self, ctx: dict, id: int) -> dict:
+        return {"status": "cancelled" if self.db.delete_reminder(int(id)) else "no such upcoming reminder"}
 
-    # ------------------------------------------------------------------ code generation
-    def _codegen(self, request: str) -> str:
-        llm = self._require(self.llm, "Gemini")
+    # ---- code generation
+    def _tool_make_code_project(self, ctx: dict, request: str) -> dict:
+        llm = self.llm
 
         def work() -> None:
             try:
@@ -364,19 +355,55 @@ class Agent:
             names = ", ".join(f["path"] for f in project["files"][:8])
             if self.github is None:
                 self.notify(
-                    f"Wrote {project['name']} ({names}) but GitHub isn't configured, so I couldn't "
+                    f"I wrote {project['name']} ({names}) but GitHub isn't configured, so I couldn't "
                     "save it. Set GITHUB_TOKEN and GITHUB_REPO."
                 )
                 return
             try:
                 url = self.github.push_project(folder, project["files"], f"agent: {project['name']}")
             except GitHubError as exc:
-                self.notify(f"Wrote {project['name']} but pushing to GitHub failed: {exc}")
+                self.notify(f"I wrote {project['name']} but pushing to GitHub failed: {exc}")
                 return
             self.notify(f"Done: {project['summary']}\nFiles: {names}\n{url}\nReview it before running it.")
 
         self.background(work)
-        return "Working on it. I'll text you the GitHub link when the code is ready."
+        return {"status": "started; the user gets a text with the GitHub link when it's ready"}
+
+    # ------------------------------------------------------------------ laptop helper API
+    def helper_poll(self) -> dict | None:
+        self.db.set("helper_last_seen", self.now().isoformat())
+        while (cmd := self.db.next_helper_command()) is not None:
+            created = self.db.helper_command_created(cmd["id"])
+            if self.now() - created > HELPER_COMMAND_MAX_AGE:
+                self.db.finish_helper_command(cmd["id"], False, "expired before helper picked it up")
+                continue
+            return cmd
+        return None
+
+    def helper_result(self, cid: int, ok: bool, detail: str) -> None:
+        with self._lock:
+            cmd = self.db.finish_helper_command(cid, ok, detail)
+            awaited = cid in self._awaiting
+        if cmd is None:
+            return
+        if cmd["action"] == "set" and ok:
+            self.db.set("last_location", cmd["payload"])
+        elif cmd["action"] == "clear" and ok:
+            self.db.set("last_location", None)
+        if awaited:
+            return  # the waiting /message request reports it in its reply
+        if cmd["action"] == "set":
+            self.notify(
+                f"Location set: {cmd['payload']['label']}. Check Find My to see it."
+                if ok
+                else f"Couldn't set the location: {detail}"
+            )
+        elif cmd["action"] == "clear":
+            self.notify(
+                "Real location restored."
+                if ok
+                else f"Couldn't restore the real location: {detail}. Restarting the phone also clears it."
+            )
 
     # ------------------------------------------------------------------ scheduler
     def tick(self) -> None:

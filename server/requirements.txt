@@ -5,5 +5,4 @@ google-genai>=1.0
 google-api-python-client>=2.120
 google-auth>=2.29
 google-auth-oauthlib>=1.2
-dateparser>=1.2
 tzdata>=2024.1

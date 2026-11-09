@@ -2,42 +2,51 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from typing import Any, Callable
 
 
 class LLMError(Exception):
     pass
 
 
-SYSTEM = (
-    "You are a personal assistant whose replies are delivered as iMessage texts. "
-    "Be concise and plain-text (no markdown headings, no tables). "
-    "Never include the literal text 'agent:' in replies."
+PLAIN = (
+    "Your output is delivered as an iMessage text: plain text only, no markdown "
+    "(no **, #, tables or code fences)."
 )
+
+
+def _jsonable(value: Any) -> dict:
+    """Function responses must be JSON objects."""
+    try:
+        json.dumps(value)
+    except TypeError:
+        value = json.loads(json.dumps(value, default=str))
+    return value if isinstance(value, dict) else {"result": value}
 
 
 class GeminiLLM:
     def __init__(self, api_key: str, model: str):
         from google import genai  # imported lazily so tests don't need the package
 
-        self._genai = genai
         self._client = genai.Client(api_key=api_key)
         self._model = model
+
+    def _call(self, contents, config):
+        try:
+            return self._client.models.generate_content(
+                model=self._model, contents=contents, config=config
+            )
+        except Exception as exc:  # quota (429), network, auth...
+            raise LLMError(str(exc)) from exc
 
     def _generate(self, prompt: str, json_mode: bool = False) -> str:
         from google.genai import types
 
         cfg = types.GenerateContentConfig(
-            system_instruction=SYSTEM,
+            system_instruction=PLAIN,
             response_mime_type="application/json" if json_mode else "text/plain",
         )
-        try:
-            resp = self._client.models.generate_content(
-                model=self._model, contents=prompt, config=cfg
-            )
-        except Exception as exc:  # quota (429), network, auth...
-            raise LLMError(str(exc)) from exc
-        text = (resp.text or "").strip()
+        text = (self._call(prompt, cfg).text or "").strip()
         if not text:
             raise LLMError("empty response from Gemini")
         return text
@@ -49,10 +58,58 @@ class GeminiLLM:
         except json.JSONDecodeError as exc:
             raise LLMError(f"Gemini returned invalid JSON: {raw[:200]}") from exc
 
-    # ---- tasks ----
-    def chat(self, text: str) -> str:
-        return self._generate(text)
+    # ---- conversation with tools ----
+    def converse(
+        self,
+        system: str,
+        history: list[dict],
+        tools: list[dict],
+        call_tool: Callable[[str, dict], dict],
+        max_steps: int = 6,
+    ) -> str:
+        """Run a function-calling loop. history: [{"role": "user"|"model", "text": str}, ...]."""
+        from google.genai import types
 
+        decls = [
+            types.FunctionDeclaration(
+                name=t["name"], description=t["description"], parameters_json_schema=t["parameters"]
+            )
+            for t in tools
+        ]
+        cfg = types.GenerateContentConfig(
+            system_instruction=system,
+            tools=[types.Tool(function_declarations=decls)],
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+        )
+        while history and history[0]["role"] != "user":
+            history = history[1:]
+        contents = [
+            types.Content(role=m["role"], parts=[types.Part.from_text(text=m["text"])])
+            for m in history
+        ]
+        for _ in range(max_steps):
+            resp = self._call(contents, cfg)
+            calls = resp.function_calls or []
+            if not calls:
+                text = (resp.text or "").strip()
+                if not text:
+                    raise LLMError("empty response from Gemini")
+                return text
+            contents.append(resp.candidates[0].content)
+            contents.append(
+                types.Content(
+                    role="user",
+                    parts=[
+                        types.Part.from_function_response(
+                            name=c.name, response=_jsonable(call_tool(c.name, dict(c.args or {})))
+                        )
+                        for c in calls
+                    ],
+                )
+            )
+        raise LLMError("too many tool steps")
+
+    # ---- single-shot tasks ----
     def summarize_emails(self, emails: list[dict]) -> str:
         if not emails:
             return "No new email in the last 2 days."
@@ -69,31 +126,19 @@ class GeminiLLM:
         )
         return self._generate(prompt)
 
-    def draft_email(self, to: str, instruction: str) -> dict:
+    def style_profile(self, user_messages: list[str], previous: str) -> str:
+        """Describe how the user texts, so replies can mirror it."""
+        sample = "\n".join(f"- {m}" for m in user_messages)
         prompt = (
-            f"Draft an email to {to}. What it should say: {instruction}\n"
-            'Return JSON: {"subject": str, "body": str}. Natural tone, sign off without a name '
-            "placeholder (no [Your Name])."
+            "These are recent text messages a person sent to their assistant:\n"
+            f"{sample}\n\n"
+            f"Previous notes on their style (may be empty): {previous or '(none)'}\n\n"
+            "In at most 5 short lines, describe HOW they text so the assistant can mirror it: "
+            "typical length, capitalization, punctuation, emoji use, slang/abbreviations, tone. "
+            "Update the previous notes rather than starting over. Don't describe the content of "
+            "the messages, only the style."
         )
-        d = self._json(prompt)
-        if not isinstance(d.get("subject"), str) or not isinstance(d.get("body"), str):
-            raise LLMError("draft missing subject/body")
-        return {"subject": d["subject"], "body": d["body"]}
-
-    def parse_reminder(self, text: str, now_local: datetime) -> dict:
-        prompt = (
-            f"Current local date/time: {now_local.strftime('%A %Y-%m-%d %H:%M')}.\n"
-            f"Reminder request: {text!r}\n"
-            "Extract the task and the local date/time it is due. If no time is given, use 09:00. "
-            "If only a weekday is given, use the next occurrence. "
-            'Return JSON: {"task": str, "due_local": "YYYY-MM-DDTHH:MM"}'
-        )
-        d = self._json(prompt)
-        try:
-            due = datetime.fromisoformat(d["due_local"])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise LLMError(f"bad reminder parse: {d}") from exc
-        return {"task": str(d.get("task") or text), "due_local": due}
+        return self._generate(prompt)
 
     def generate_code(self, request: str) -> dict:
         prompt = (

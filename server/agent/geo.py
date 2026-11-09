@@ -87,6 +87,56 @@ class Nominatim:
         }
 
 
+class CensusGeocoder:
+    """US Census Bureau geocoder: free, no key, accurate house-number matches for US addresses."""
+
+    URL = "https://geocoding.geo.census.gov/geocoder/locations/onelineaddress"
+
+    def __init__(self, http=None):
+        import httpx
+
+        self._http = http or httpx.Client(timeout=12, headers={"User-Agent": USER_AGENT})
+
+    def lookup(self, query: str) -> dict | None:
+        try:
+            r = self._http.get(
+                self.URL,
+                params={"address": query, "benchmark": "Public_AR_Current", "format": "json"},
+            )
+            r.raise_for_status()
+            matches = r.json().get("result", {}).get("addressMatches", [])
+        except Exception:
+            return None  # fall back to the next geocoder
+        if not matches:
+            return None
+        m = matches[0]
+        c = m["coordinates"]
+        return {
+            "lat": float(c["y"]),
+            "lon": float(c["x"]),
+            "label": m.get("matchedAddress", query),
+            "kind": "house",
+        }
+
+
+_STREET_ADDRESS = re.compile(r"^\s*\d+[A-Za-z]?\s+\S")
+
+
+class ChainGeocoder:
+    """Street addresses ("123 Main St ...") try the Census geocoder first, then OpenStreetMap."""
+
+    def __init__(self, census, osm):
+        self._census = census
+        self._osm = osm
+
+    def lookup(self, query: str) -> dict | None:
+        if _STREET_ADDRESS.match(query):
+            hit = self._census.lookup(query)
+            if hit:
+                return hit
+        return self._osm.lookup(query)
+
+
 class IPLocator:
     """Free IP geolocation via ip-api.com (non-commercial use)."""
 
