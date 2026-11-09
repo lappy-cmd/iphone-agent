@@ -27,7 +27,10 @@ class Settings:
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.5-flash"
     db_path: str = "agent.db"
+    turso_url: str = ""  # set to use a hosted Turso database instead of the db_path file
+    turso_token: str = ""
     gmail_token_path: str = "token.json"
+    gmail_token_json: str = ""  # token.json contents; written to gmail_token_path if that file is missing
     github_token: str = ""
     github_repo: str = ""  # "owner/repo"
     digest_time: str = "07:30"  # HH:MM local, empty disables
@@ -49,7 +52,10 @@ class Settings:
             gemini_api_key=e("GEMINI_API_KEY", ""),
             gemini_model=e("GEMINI_MODEL", "gemini-2.5-flash"),
             db_path=e("DB_PATH", "agent.db"),
+            turso_url=e("TURSO_DATABASE_URL", ""),
+            turso_token=e("TURSO_AUTH_TOKEN", ""),
             gmail_token_path=e("GMAIL_TOKEN_PATH", "token.json"),
+            gmail_token_json=e("GMAIL_TOKEN_JSON", ""),
             github_token=e("GITHUB_TOKEN", ""),
             github_repo=e("GITHUB_REPO", ""),
             digest_time=e("DIGEST_TIME", "07:30"),

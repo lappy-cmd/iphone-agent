@@ -1,0 +1,34 @@
+# Render Blueprint: free web service for the agent server.
+# Render -> New -> Blueprint -> pick this repo. Values marked `sync: false` are asked for on first deploy.
+services:
+  - type: web
+    name: iphone-agent
+    runtime: python
+    plan: free
+    rootDir: server
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn agent.app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: AGENT_KEY
+        sync: false
+      - key: HELPER_KEY
+        sync: false
+      - key: MY_EMAIL
+        sync: false
+      - key: TIMEZONE
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: GITHUB_REPO
+        sync: false
+      - key: TURSO_DATABASE_URL
+        sync: false
+      - key: TURSO_AUTH_TOKEN
+        sync: false
+      - key: GMAIL_TOKEN_JSON
+        sync: false

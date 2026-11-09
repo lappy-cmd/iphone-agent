@@ -1,8 +1,9 @@
-"""HTTP API. Run: uvicorn agent.app:app --host 127.0.0.1 --port 8000 (Caddy provides HTTPS)."""
+"""HTTP API. Run: uvicorn agent.app:app --host 127.0.0.1 --port 8000 (Caddy or the host provides HTTPS)."""
 from __future__ import annotations
 
 import hmac
 import logging
+import os
 import threading
 from contextlib import asynccontextmanager
 
@@ -30,6 +31,10 @@ def build_agent(settings: Settings) -> Agent:
     if settings.my_email:
         from .gmail import Gmail
 
+        if settings.gmail_token_json and not os.path.exists(settings.gmail_token_path):
+            with open(settings.gmail_token_path, "w", encoding="utf-8") as fh:
+                fh.write(settings.gmail_token_json)
+
         gmail = Gmail(settings.gmail_token_path, settings.my_email)
     if settings.github_token and settings.github_repo:
         from .github import GitHub
@@ -37,7 +42,7 @@ def build_agent(settings: Settings) -> Agent:
         github = GitHub(settings.github_token, settings.github_repo)
     return Agent(
         settings,
-        DB(settings.db_path),
+        DB(settings.db_path, turso_url=settings.turso_url, turso_token=settings.turso_token),
         llm=llm,
         gmail=gmail,
         geocoder=Nominatim(),

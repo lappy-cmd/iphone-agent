@@ -1,4 +1,8 @@
-"""SQLite storage: reminders, pending confirmation, helper command queue, key/value state.
+"""Storage: reminders, pending confirmation, helper command queue, key/value state.
+
+Two backends with the same SQL (SQLite dialect):
+- a local SQLite file (default, for a VM or laptop), or
+- a hosted Turso/libSQL database over its HTTP API (for free hosts whose disk is wiped on restart).
 
 All timestamps are stored as UTC ISO-8601 strings.
 """
@@ -7,6 +11,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
@@ -48,24 +53,118 @@ def _dt(s: str | None) -> datetime | None:
     return datetime.fromisoformat(s) if s else None
 
 
-class DB:
-    def __init__(self, path: str = ":memory:"):
+class DBError(Exception):
+    pass
+
+
+@dataclass
+class Result:
+    rows: list[dict] = field(default_factory=list)
+    rowcount: int = 0
+    lastrowid: int | None = None
+
+
+def _statements(script: str) -> list[str]:
+    return [st.strip() for st in script.split(";") if st.strip()]
+
+
+class SQLiteConn:
+    def __init__(self, path: str):
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
-        self._lock = threading.Lock()
+
+    def execute(self, sql: str, args: tuple = ()) -> Result:
+        cur = self._conn.execute(sql, args)
+        rows = [dict(r) for r in cur.fetchall()]
+        self._conn.commit()
+        return Result(rows, cur.rowcount, cur.lastrowid)
+
+    def executescript(self, script: str) -> None:
+        self._conn.executescript(script)
+        self._conn.commit()
+
+
+def _encode(v: Any) -> dict:
+    if v is None:
+        return {"type": "null"}
+    if isinstance(v, bool):
+        return {"type": "integer", "value": str(int(v))}
+    if isinstance(v, int):
+        return {"type": "integer", "value": str(v)}
+    if isinstance(v, float):
+        return {"type": "float", "value": v}
+    return {"type": "text", "value": str(v)}
+
+
+def _decode(v: dict) -> Any:
+    t = v.get("type")
+    if t == "null":
+        return None
+    if t == "integer":
+        return int(v["value"])
+    if t == "float":
+        return float(v["value"])
+    return v.get("value")
+
+
+class TursoConn:
+    """Minimal client for Turso's HTTP API (POST /v2/pipeline). Each call is its own request."""
+
+    def __init__(self, url: str, token: str, client=None):
+        import httpx
+
+        if url.startswith("libsql://"):
+            url = "https://" + url[len("libsql://"):]
+        self._url = url.rstrip("/") + "/v2/pipeline"
+        self._headers = {"Authorization": f"Bearer {token}"}
+        self._client = client or httpx.Client(timeout=15)
+
+    def _pipeline(self, stmts: list[tuple[str, tuple]]) -> list[dict]:
+        reqs = [
+            {"type": "execute", "stmt": {"sql": sql, "args": [_encode(a) for a in args]}}
+            for sql, args in stmts
+        ]
+        reqs.append({"type": "close"})
+        try:
+            resp = self._client.post(self._url, json={"requests": reqs}, headers=self._headers)
+        except Exception as exc:
+            raise DBError(f"database unreachable: {exc}") from exc
+        if resp.status_code != 200:
+            raise DBError(f"database HTTP {resp.status_code}: {resp.text[:200]}")
+        out = []
+        for res in resp.json()["results"][: len(stmts)]:
+            if res.get("type") != "ok":
+                raise DBError(res.get("error", {}).get("message", "database error"))
+            out.append(res["response"]["result"])
+        return out
+
+    def execute(self, sql: str, args: tuple = ()) -> Result:
+        r = self._pipeline([(sql, args)])[0]
+        names = [c.get("name") for c in r.get("cols", [])]
+        rows = [dict(zip(names, (_decode(v) for v in row))) for row in r.get("rows", [])]
+        last = r.get("last_insert_rowid")
+        return Result(rows, int(r.get("affected_row_count") or 0), int(last) if last is not None else None)
+
+    def executescript(self, script: str) -> None:
+        self._pipeline([(st, ()) for st in _statements(script)])
+
+
+class DB:
+    def __init__(self, path: str = ":memory:", *, turso_url: str = "", turso_token: str = "", http_client=None):
+        if turso_url:
+            self._conn = TursoConn(turso_url, turso_token, http_client)
+        else:
+            self._conn = SQLiteConn(path)
+        self._lock = threading.RLock()
         with self._lock:
             self._conn.executescript(SCHEMA)
-            self._conn.commit()
 
-    def _exec(self, sql: str, args: tuple = ()) -> sqlite3.Cursor:
+    def _exec(self, sql: str, args: tuple = ()) -> Result:
         with self._lock:
-            cur = self._conn.execute(sql, args)
-            self._conn.commit()
-            return cur
+            return self._conn.execute(sql, args)
 
-    def _all(self, sql: str, args: tuple = ()) -> list[sqlite3.Row]:
-        with self._lock:
-            return self._conn.execute(sql, args).fetchall()
+    def _all(self, sql: str, args: tuple = ()) -> list[dict]:
+        return self._exec(sql, args).rows
 
     # ---- key/value ----
     def get(self, key: str, default: Any = None) -> Any:
@@ -113,7 +212,7 @@ class DB:
         self._exec("UPDATE reminders SET heads_up_sent = 1 WHERE id = ?", (rid,))
 
     @staticmethod
-    def _reminder(r: sqlite3.Row) -> dict:
+    def _reminder(r: dict) -> dict:
         return {
             "id": r["id"],
             "text": r["text"],
@@ -152,15 +251,13 @@ class DB:
     def next_helper_command(self) -> dict | None:
         """Hand out the oldest queued command and mark it sent."""
         with self._lock:
-            row = self._conn.execute(
+            rows = self._all(
                 "SELECT * FROM helper_commands WHERE status = 'queued' ORDER BY id LIMIT 1"
-            ).fetchone()
-            if not row:
-                return None
-            self._conn.execute(
-                "UPDATE helper_commands SET status = 'sent' WHERE id = ?", (row["id"],)
             )
-            self._conn.commit()
+            if not rows:
+                return None
+            row = rows[0]
+            self._exec("UPDATE helper_commands SET status = 'sent' WHERE id = ?", (row["id"],))
         return {"id": row["id"], "action": row["action"], "payload": json.loads(row["payload"])}
 
     def helper_command_created(self, cid: int) -> datetime:

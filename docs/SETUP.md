@@ -1,29 +1,23 @@
 # Setup guide
 
 Every service used here is free. Expect it to take about 1–2 hours the first time. Do the steps in order.
-Wherever you see `NAME`, use the DuckDNS name you pick in step 1.
+Wherever you see `APP`, use your Render service name from step 4 (your server lives at
+`https://APP.onrender.com`). No credit card is needed for the services in steps 1–4.
+
+The server runs 24/7 on Render's free plan. Render puts free services to sleep after 15 minutes without
+traffic, so a free pinger keeps it awake (step 4). Render also wipes its disk on every restart, so reminders and
+other state live in a free hosted Turso database (step 1).
 
 ---
 
-## 1. Free cloud server (Oracle Cloud Always Free)
+## 1. Database (Turso, free)
 
-1. Sign up at **cloud.oracle.com** (a card is needed for verification only; Always Free resources cost $0).
-2. Create a VM instance with the **Ubuntu 24.04** image and an **Always Free eligible** shape. Download the SSH key.
-3. In the VM's subnet **Security List**, add ingress rules for TCP **80** and **443** from `0.0.0.0/0`.
-4. SSH in (`ssh -i key.pem ubuntu@PUBLIC_IP`) and open those ports in the OS firewall too
-   (Oracle's Ubuntu images block them by default):
-   ```bash
-   sudo iptables -I INPUT 6 -p tcp --dport 80 -j ACCEPT
-   sudo iptables -I INPUT 6 -p tcp --dport 443 -j ACCEPT
-   sudo netfilter-persistent save
-   ```
-5. At **duckdns.org**, sign in, create a subdomain `NAME`, and set it to the VM's public IP.
-6. Install Caddy (HTTPS) by following https://caddyserver.com/docs/install#debian-ubuntu-raspbian, then:
-   ```bash
-   sudo cp ~/iphone-agent/server/deploy/Caddyfile /etc/caddy/Caddyfile   # after step 3 below
-   sudo sed -i 's/YOURNAME/NAME/' /etc/caddy/Caddyfile
-   sudo systemctl reload caddy
-   ```
+1. Sign up at **turso.tech** (signing in with GitHub is fine).
+2. Create a database. The name doesn't matter; pick the location closest to you.
+3. On the database page, copy its URL (starts with `libsql://`). That's `TURSO_DATABASE_URL`.
+4. Create a token for it with **read & write** access and no expiry. That's `TURSO_AUTH_TOKEN`.
+
+The server creates its tables on first start.
 
 ## 2. Google: Gemini key + Gmail access
 
@@ -45,34 +39,59 @@ Wherever you see `NAME`, use the DuckDNS name you pick in step 1.
    python -m venv .venv; .\.venv\Scripts\pip install -r requirements.txt
    .\.venv\Scripts\python scripts\gmail_auth.py C:\path\to\credentials.json
    ```
-   Sign in with your Gmail account and approve. This creates `token.json`, which goes to the server in step 4.
+   Sign in with your Gmail account and approve. This creates `server	oken.json`. Its contents become `GMAIL_TOKEN_JSON` in step 4.
 
-## 3. GitHub (stores the code the agent generates)
+## 3. GitHub
 
+**A. Repo for the code the agent generates**
 1. Create a **private** repo, e.g. `agent-generated-code`, and tick *Add a README* (the repo must not be empty).
 2. Go to *Settings → Developer settings → Fine-grained tokens → Generate*. Under *Repository access*, choose
    **only that repo**. Under *Permissions*, set **Contents: Read and write**. Copy the token.
 
-## 4. Deploy the server
+**B. Repo for this project (Render deploys from it)**
+1. Create another **private** repo, e.g. `iphone-agent`, and leave it empty (no README).
+2. On the laptop, push this folder to it. `.gitignore` keeps `.env`, `token.json` and `credentials.json` out:
+   ```powershell
+   cd iphone-agent
+   git remote add origin https://github.com/YOU/iphone-agent.git
+   git push -u origin HEAD:main
+   ```
 
-On the VM:
-```bash
-sudo apt update && sudo apt install -y python3-venv git
-git clone <your copy of this repo> ~/iphone-agent      # or scp the folder up
-cd ~/iphone-agent/server
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-cp .env.example .env && python3 scripts/make_keys.py   # paste both keys into .env
-nano .env        # fill in MY_EMAIL, GEMINI_API_KEY, GITHUB_TOKEN, GITHUB_REPO, TIMEZONE
-```
-From the laptop, copy the token up: `scp -i key.pem server\token.json ubuntu@PUBLIC_IP:~/iphone-agent/server/`
+## 4. Deploy the server (Render, free) + keep it awake
 
-Run it as a service:
-```bash
-sudo cp deploy/iphone-agent.service /etc/systemd/system/
-sudo systemctl daemon-reload && sudo systemctl enable --now iphone-agent
-curl https://NAME.duckdns.org/health        # -> {"ok":true,"helper_online":false}
-```
-Logs: `journalctl -u iphone-agent -f`
+1. On the laptop, make your two secret keys and keep the output somewhere safe:
+   ```powershell
+   cd iphone-agent\server
+   .\.venv\Scripts\python scripts\make_keys.py
+   ```
+2. Sign up at **render.com** with GitHub and let it see your `iphone-agent` repo.
+3. Click **New → Blueprint** and pick the `iphone-agent` repo. Render reads `render.yaml` and asks for these values:
+
+   | Variable | Value |
+   |---|---|
+   | `AGENT_KEY`, `HELPER_KEY` | from step 1 above |
+   | `MY_EMAIL` | your Gmail address |
+   | `TIMEZONE` | e.g. `America/Los_Angeles` |
+   | `GEMINI_API_KEY` | from section 2 |
+   | `GITHUB_TOKEN`, `GITHUB_REPO` | from section 3A (`GITHUB_REPO` is `YOU/agent-generated-code`) |
+   | `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN` | from section 1 |
+   | `GMAIL_TOKEN_JSON` | open `server	oken.json` in Notepad and paste **the whole contents** |
+
+   Click **Apply**. The first build takes a few minutes.
+4. When it's live, the service page shows your URL, `https://APP.onrender.com`. Check it:
+   ```powershell
+   curl.exe https://APP.onrender.com/health     # -> {"ok":true,"helper_online":false}
+   ```
+   Logs are on the service's **Logs** tab.
+5. **Keep it awake:** sign up at **cron-job.org** (free), then **Create cronjob**:
+   - URL `https://APP.onrender.com/health`
+   - schedule: every **10 minutes**
+
+   Without this, Render puts the server to sleep after 15 idle minutes. Reminders and the morning digest
+   wouldn't go out, and the first text after a sleep could take about a minute to answer. Render's free
+   750 hours a month cover one service running all month.
+
+Updating the server later: push to GitHub and Render redeploys automatically. Your data is safe in Turso.
 
 ## 5. iPhone Shortcuts (the texting part)
 
@@ -86,7 +105,7 @@ Shortcuts → **Automation** → **+** → **Message**
 - Choose **Run Immediately** and turn off *Notify When Run*
 
 Actions:
-1. **Get Contents of URL**: `https://NAME.duckdns.org/message`
+1. **Get Contents of URL**: `https://APP.onrender.com/message`
    - Method **POST**
    - Headers: `X-Agent-Key` = your AGENT_KEY
    - Request Body **JSON**: key `text` (Text) = **Shortcut Input** (tap it and choose the message *Content*)
@@ -109,7 +128,7 @@ the Action Button, or a home-screen icon.
 ### Test these first (this is where iOS can surprise you)
 1. Text yourself `agent: help`. Does Automation A fire? Some iOS versions don't count a message **you sent to
    yourself** as "received". If it doesn't fire, use the *Ask Agent* shortcut instead. The server works either way.
-2. Run `curl -X POST https://NAME.duckdns.org/message -H "X-Agent-Key: KEY" -H "Content-Type: application/json" -d "{\"text\":\"agent: remind me test in 2 minutes\"}"`.
+2. Run `curl -X POST https://APP.onrender.com/message -H "X-Agent-Key: KEY" -H "Content-Type: application/json" -d "{\"text\":\"agent: remind me test in 2 minutes\"}"`.
    Two minutes later the reminder email should arrive and Automation B should text it to you. If the text
    includes the whole email header instead of just the body, add a **Get Text from Input** step before
    *Send Message*.
@@ -131,8 +150,8 @@ the Action Button, or a home-screen icon.
    ```
 6. In a normal terminal, do a dry run first, then the real thing:
    ```powershell
-   .\.venv\Scripts\python location_helper.py --server https://NAME.duckdns.org --key HELPER_KEY --dry-run
-   .\.venv\Scripts\python location_helper.py --server https://NAME.duckdns.org --key HELPER_KEY
+   .\.venv\Scripts\python location_helper.py --server https://APP.onrender.com --key HELPER_KEY --dry-run
+   .\.venv\Scripts\python location_helper.py --server https://APP.onrender.com --key HELPER_KEY
    ```
    Press `Ctrl+C` to stop the helper. It clears the fake location on exit.
 
@@ -146,7 +165,7 @@ browsing data. Text `agent: where am i` with the VPN off, then on, and compare t
 
 ## 8. Pre-presentation checklist
 
-- [ ] `https://NAME.duckdns.org/health` shows `"helper_online": true` (helper running, phone plugged in)
+- [ ] `https://APP.onrender.com/health` shows `"helper_online": true` (helper running, phone plugged in)
 - [ ] `agent: help` → a reply arrives in iMessage
 - [ ] `agent: put me at <a test address>` → confirm with `agent: yes` → a "Location set" text arrives
 - [ ] **Find My** (on another device or icloud.com/find) shows the new spot

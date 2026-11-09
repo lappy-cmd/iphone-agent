@@ -4,8 +4,8 @@ A personal assistant you text from iMessage. It summarizes and sends Gmail, text
 morning digest, writes code (including new agents) into a GitHub repo, and, for a university project on
 location-tracking weaknesses, sets the iPhone's reported location (visible in Find My) to an exact address.
 
-Runs for $0: Gemini free tier, an Oracle Always Free VM, DuckDNS + Caddy HTTPS, OpenStreetMap geocoding, and
-iPhone Shortcuts for messaging. No paid SMS.
+Runs for $0: Gemini free tier, a Render free web service (kept awake by a free cron-job.org ping) with a
+free Turso database, OpenStreetMap geocoding, and iPhone Shortcuts for messaging. No paid SMS.
 
 ```
 iPhone Shortcuts ──"agent: ..."──► cloud server (FastAPI + Gemini + Gmail + scheduler)

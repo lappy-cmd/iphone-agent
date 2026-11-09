@@ -1,3 +1,4 @@
+import json
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -104,11 +105,74 @@ def settings():
     return Settings(agent_key="AK", helper_key="HK", my_email="me@gmail.com")
 
 
-@pytest.fixture
-def agent(settings, clock):
+def fake_turso_client():
+    """httpx client whose transport mimics Turso's /v2/pipeline API on top of in-memory SQLite."""
+    import sqlite3
+
+    import httpx
+
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
+
+    def arg(v):
+        t = v["type"]
+        if t == "null":
+            return None
+        if t == "integer":
+            assert isinstance(v["value"], str), "integers must be sent as strings"
+            return int(v["value"])
+        if t == "float":
+            return float(v["value"])
+        assert t == "text", t
+        return v["value"]
+
+    def val(x):
+        if x is None:
+            return {"type": "null"}
+        if isinstance(x, int):
+            return {"type": "integer", "value": str(x)}
+        if isinstance(x, float):
+            return {"type": "float", "value": x}
+        return {"type": "text", "value": x}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v2/pipeline"
+        assert request.headers["authorization"] == "Bearer TOKEN"
+        results = []
+        for req in json.loads(request.content)["requests"]:
+            if req["type"] == "close":
+                results.append({"type": "ok", "response": {"type": "close"}})
+                continue
+            stmt = req["stmt"]
+            try:
+                cur = conn.execute(stmt["sql"], [arg(a) for a in stmt.get("args", [])])
+                rows = cur.fetchall()
+                conn.commit()
+            except sqlite3.Error as exc:
+                results.append({"type": "error", "error": {"message": str(exc)}})
+                continue
+            cols = [{"name": d[0]} for d in (cur.description or [])]
+            results.append({"type": "ok", "response": {"type": "execute", "result": {
+                "cols": cols,
+                "rows": [[val(x) for x in r] for r in rows],
+                "affected_row_count": max(cur.rowcount, 0),
+                "last_insert_rowid": str(cur.lastrowid) if cur.lastrowid else None,
+            }}})
+        return httpx.Response(200, json={"baton": None, "base_url": None, "results": results})
+
+    return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+def make_db(backend: str) -> DB:
+    if backend == "turso":
+        return DB(turso_url="libsql://test-db.turso.io", turso_token="TOKEN", http_client=fake_turso_client())
+    return DB(":memory:")
+
+
+@pytest.fixture(params=["sqlite", "turso"])
+def agent(request, settings, clock):
     return Agent(
         settings,
-        DB(":memory:"),
+        make_db(request.param),
         llm=FakeLLM(),
         gmail=FakeGmail(),
         geocoder=FakeGeocoder(),
