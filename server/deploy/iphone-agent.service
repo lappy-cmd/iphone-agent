@@ -1,0 +1,13 @@
+[Unit]
+Description=iPhone Agent
+After=network-online.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/iphone-agent/server
+ExecStart=/home/ubuntu/iphone-agent/server/.venv/bin/uvicorn agent.app:app --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

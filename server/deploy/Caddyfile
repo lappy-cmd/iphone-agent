@@ -1,0 +1,4 @@
+# Replace with your DuckDNS name. Caddy gets a free Let's Encrypt certificate automatically.
+YOURNAME.duckdns.org {
+    reverse_proxy 127.0.0.1:8000
+}
