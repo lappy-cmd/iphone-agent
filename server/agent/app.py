@@ -77,10 +77,19 @@ def create_app(agent: Agent, run_scheduler: bool = True) -> FastAPI:
             except Exception:
                 log.exception("tick failed")
 
+    def voice_poller() -> None:
+        while not stop.wait(max(agent.s.voice_poll_seconds, 2)):
+            try:
+                agent.poll_voice()
+            except Exception:
+                log.exception("google voice poll failed")
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         if run_scheduler:
             threading.Thread(target=scheduler, daemon=True).start()
+            if agent.voice_enabled():
+                threading.Thread(target=voice_poller, daemon=True).start()
         yield
         stop.set()
 

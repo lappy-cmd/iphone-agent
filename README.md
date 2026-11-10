@@ -9,7 +9,7 @@ Runs for $0: Gemini free tier, a Render free web service (kept awake by a free c
 free Turso database, US Census + OpenStreetMap geocoding, and iPhone Shortcuts for messaging. No paid SMS.
 
 ```
-iPhone self-chat ──any text──► cloud server (FastAPI + Gemini tools + Gmail + scheduler)
+Google Voice number (or iPhone self-chat) ──any text──► cloud server (FastAPI + Gemini tools + Gmail + scheduler)
         ◄── reply / [agent] email to iCloud ──┘           ▲
                                                 │ polls (outbound only)
                           Windows laptop: location_helper.py → pymobiledevice3 → iPhone (USB)

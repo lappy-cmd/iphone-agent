@@ -75,6 +75,8 @@ class FakeGmail:
     def __init__(self):
         self.sent = []
         self.notes = []
+        self.voice_inbox = []
+        self.voice_sent = []
 
     def recent(self):
         return [{"from": "a", "subject": "s", "date": "d", "snippet": "x", "unread": True}]
@@ -84,6 +86,15 @@ class FakeGmail:
 
     def notify_self(self, text):
         self.notes.append(text)
+
+    # Google Voice
+    def voice_messages(self, after_epoch):
+        self.voice_after = after_epoch
+        return list(self.voice_inbox)
+
+    def voice_reply(self, to, subject, text, thread_id="", in_reply_to=""):
+        self.voice_sent.append({"to": to, "subject": subject, "text": text,
+                                "thread_id": thread_id, "in_reply_to": in_reply_to})
 
 
 class FakeGeocoder:

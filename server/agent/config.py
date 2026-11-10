@@ -38,6 +38,8 @@ class Settings:
     heads_up_hours: int = 24  # 0 disables day-before heads-up
     confirm_ttl_minutes: int = 10
     helper_offline_seconds: int = 30
+    owner_phone: str = ""  # your cell number; set it to turn on Google Voice texting (others are ignored)
+    voice_poll_seconds: int = 5  # how often to check Gmail for Google Voice texts
     location_wait_seconds: int = 20  # wait this long for the laptop before replying inline
     history_messages: int = 20  # conversation turns the AI sees
     style_every: int = 10  # refresh the "how you text" profile every N messages
@@ -53,6 +55,8 @@ class Settings:
             helper_key=e("HELPER_KEY", ""),
             my_email=e("MY_EMAIL", ""),
             notify_email=e("NOTIFY_EMAIL", ""),
+            owner_phone=e("OWNER_PHONE", ""),
+            voice_poll_seconds=int(e("VOICE_POLL_SECONDS", "5")),
             timezone=e("TIMEZONE", "America/Los_Angeles"),
             gemini_api_key=e("GEMINI_API_KEY", ""),
             gemini_model=e("GEMINI_MODEL", "gemini-3.8-flash"),

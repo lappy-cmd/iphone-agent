@@ -6,6 +6,7 @@ import re
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from email.utils import parseaddr
 from typing import Callable
 from zoneinfo import ZoneInfo
 
@@ -81,11 +82,13 @@ class Agent:
         return f"{loc:%a %b} {loc.day} {loc.strftime('%I:%M %p').lstrip('0')}"
 
     def notify(self, text: str) -> None:
-        """Proactive text: email -> iPhone 'Agent Out' automation -> iMessage."""
+        """Proactive text: through Google Voice when set up, else email -> 'Agent Out' -> iMessage."""
         if self.gmail is None:
             log.warning("notify without gmail: %s", text)
             return
         try:
+            if self.voice_enabled() and self._voice_send(text):
+                return
             self.gmail.notify_self(mark(text))
         except Exception:  # never let a notification failure kill the scheduler
             log.exception("notify failed")
@@ -100,14 +103,18 @@ class Agent:
 
     # ------------------------------------------------------------------ entry point
     def handle(self, raw: str, client_ip: str | None = None) -> str:
-        """One incoming text -> one reply ('' means: send nothing)."""
+        """iPhone Shortcut path: one incoming text -> one marked reply ('' means: send nothing)."""
         if is_ours(raw):
             return ""  # our own reply/notification echoing back through the self-chat
+        return mark(self.reply(raw, client_ip))
+
+    def reply(self, raw: str, client_ip: str | None = None) -> str:
+        """The assistant's answer to one text ('' for an empty text)."""
         text = RE_PREFIX.sub("", raw or "", count=1).strip()
         if not text:
             return ""
         if self.llm is None:
-            return mark("My AI brain isn't set up yet (GEMINI_API_KEY is missing on the server).")
+            return "My AI brain isn't set up yet (GEMINI_API_KEY is missing on the server)."
 
         turn = int(self.db.get("turn", 0)) + 1
         self.db.set("turn", turn)
@@ -122,10 +129,54 @@ class Agent:
             )
         except LLMError as exc:
             log.warning("gemini error: %s", exc)
-            return mark(NO_BRAIN)
+            return NO_BRAIN
         self.db.add_message("model", reply, self.now())
         self._maybe_learn_style()
-        return mark(reply)
+        return reply
+
+    # ------------------------------------------------------------------ Google Voice texting
+    def voice_enabled(self) -> bool:
+        return bool(self.s.owner_phone and self.gmail is not None)
+
+    def poll_voice(self) -> None:
+        """Answer new Google Voice texts (forwarded to Gmail) from the owner's number."""
+        if not self.voice_enabled():
+            return
+        since = self.db.get("voice_since")
+        if since is None:  # first run: don't answer texts from before the server started
+            since = int(self.now().timestamp())
+            self.db.set("voice_since", since)
+        for m in self.gmail.voice_messages(since - 60):
+            if m["internal_ms"] < since * 1000 or not self.db.mark_seen(m["id"]):
+                continue
+            if not self._from_owner(m):
+                log.info("ignoring a Google Voice text from a number that isn't OWNER_PHONE")
+                continue
+            self.db.set(
+                "voice_thread",
+                {
+                    "to": parseaddr(m["from"])[1],
+                    "subject": m["subject"],
+                    "thread_id": m["thread_id"],
+                    "message_id": m["message_id"],
+                },
+            )
+            answer = self.reply(m["text"])
+            if answer:
+                self._voice_send(answer)
+
+    def _from_owner(self, m: dict) -> bool:
+        owner = re.sub(r"\D", "", self.s.owner_phone)[-10:]
+        return bool(owner) and owner in re.sub(r"\D", "", m["from"] + " " + m["subject"])
+
+    def _voice_send(self, text: str) -> bool:
+        thread = self.db.get("voice_thread")
+        if not thread:
+            return False
+        self.gmail.voice_reply(
+            thread["to"], thread["subject"], text, thread["thread_id"], thread["message_id"]
+        )
+        return True
 
     def _system(self) -> str:
         pending = self.db.peek_pending(self.now())

@@ -93,7 +93,26 @@ The server creates its tables on first start.
 
 Updating the server later: push to GitHub and Render redeploys automatically. Your data is safe in Turso.
 
-## 5. iPhone Shortcuts (the texting part)
+## 5. Texting the AI (Google Voice, recommended)
+
+The AI gets its own free phone number, so you text it like a person: one bubble for you, one for the
+reply. Google Voice forwards each text to your Gmail; the server reads it, and its email reply goes back to
+you as a text from that number. Reminders and "done" messages come from the same number. Only texts from
+**your** number (`OWNER_PHONE`) are answered; anyone else is ignored. Texts are SMS (green bubbles).
+
+1. Go to **voice.google.com** signed in to the **same Google account** the server's Gmail uses (the one in
+   `MY_EMAIL`). Pick a free number. Google Voice needs a US phone number to verify; use your cell.
+2. In Google Voice: **Settings (gear) → Messages → Forward messages to email → on**.
+3. In Render → *Environment*, add `OWNER_PHONE` = your cell number (e.g. `+14085551234`), and save.
+   The server only starts checking for texts when this is set.
+4. On the iPhone, save the Google Voice number as a contact (give it any name you like).
+5. Text it `hey, what can you do?`. The reply should arrive within about 5–15 seconds.
+   The first text after the server starts sets things up; texts sent *before* that are ignored.
+
+You can turn off the iPhone automations from the next section once this works.
+
+## 5b. Alternative: iPhone Shortcuts (self-chat, blue bubbles)
+
 
 Your **chat with yourself becomes the chat with the AI**: anything you text yourself goes to it, in plain
 words. No "agent:" needed. Every reply carries an invisible marker, so the server ignores its own

@@ -42,6 +42,9 @@ CREATE TABLE IF NOT EXISTS kv (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS seen_emails (
+    id TEXT PRIMARY KEY
+);
 CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     role TEXT NOT NULL,  -- user | model
@@ -292,6 +295,11 @@ class DB:
         )
         r = rows[0]
         return {"id": r["id"], "action": r["action"], "payload": json.loads(r["payload"])}
+
+    # ---- processed Google Voice emails ----
+    def mark_seen(self, email_id: str) -> bool:
+        """Record an email as handled. True if it was new."""
+        return self._exec("INSERT OR IGNORE INTO seen_emails(id) VALUES(?)", (email_id,)).rowcount > 0
 
     # ---- conversation memory ----
     def add_message(self, role: str, text: str, now: datetime) -> None:
