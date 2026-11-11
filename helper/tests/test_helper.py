@@ -101,3 +101,15 @@ def test_reconnects_and_reapplies_after_drop():
 def test_unknown_action():
     ok, detail = run(Driver(FakePhone(), clock=Clock()).handle({"action": "dance", "payload": {}}))
     assert not ok and "unknown" in detail
+
+
+def test_env_file_fills_missing_settings(tmp_path, monkeypatch):
+    from location_helper import load_env_file
+    monkeypatch.delenv("HELPER_KEY", raising=False)
+    monkeypatch.setenv("AGENT_SERVER", "https://real")
+    f = tmp_path / ".env"
+    f.write_text('# comment\nAGENT_SERVER=https://from-file\nHELPER_KEY="abc"\n', encoding="utf-8")
+    load_env_file(str(f))
+    import os
+    assert os.environ["HELPER_KEY"] == "abc" and os.environ["AGENT_SERVER"] == "https://real"
+    load_env_file(str(tmp_path / "missing"))

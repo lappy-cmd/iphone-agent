@@ -1,6 +1,7 @@
 """Laptop location helper: polls the agent server and drives the iPhone's simulated location over USB.
 
 Run in a normal terminal (no admin, no tunneld) with the iPhone plugged in and unlocked:
+    python location_helper.py          # reads AGENT_SERVER and HELPER_KEY from helper/.env
     python location_helper.py --server https://iphone-agent-rhf4.onrender.com --key HELPER_KEY
     python location_helper.py ... --dry-run     # log commands without touching the phone
 
@@ -179,7 +180,20 @@ async def amain(args) -> None:
         await session.close()
 
 
+def load_env_file(path: str) -> None:
+    """Read KEY=VALUE lines (AGENT_SERVER, HELPER_KEY) from helper/.env without overriding real env vars."""
+    try:
+        lines = open(path, encoding="utf-8-sig").read().splitlines()
+    except OSError:
+        return
+    for line in lines:
+        key, sep, value = line.strip().partition("=")
+        if sep and key and not key.startswith("#"):
+            os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
 def main() -> None:
+    load_env_file(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
     ap = argparse.ArgumentParser()
     ap.add_argument("--server", default=os.environ.get("AGENT_SERVER"), help="https://... server URL")
     ap.add_argument("--key", default=os.environ.get("HELPER_KEY"), help="HELPER_KEY from server .env")
