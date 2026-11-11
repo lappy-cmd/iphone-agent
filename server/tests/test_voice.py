@@ -95,3 +95,25 @@ def test_voice_status_reports_progress_and_errors(voice):
     with pytest.raises(RuntimeError):
         voice.poll_voice()
     assert st["last_error"].startswith("RuntimeError at ")
+
+
+def test_failed_reply_is_resent_next_poll_without_rerunning_ai(voice):
+    real_reply = voice.gmail.voice_reply
+    calls = []
+
+    def flaky(*a, **k):
+        if not calls:
+            calls.append(1)
+            raise RuntimeError("smtp hiccup")
+        return real_reply(*a, **k)
+    voice.gmail.voice_reply = flaky
+    voice.gmail.voice_inbox = [gv("m1", "hey there", now_ms(voice, 5))]
+    with pytest.raises(RuntimeError):
+        voice.poll_voice()
+    assert voice.gmail.voice_sent == []
+    voice.poll_voice()
+    [sent] = voice.gmail.voice_sent
+    assert sent["text"] == "answer to: hey there" and sent["in_reply_to"] == "<m1@mail>"
+    assert voice.voice_status["answered"] == 1
+    voice.poll_voice()
+    assert len(voice.gmail.voice_sent) == 1

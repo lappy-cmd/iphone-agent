@@ -26,6 +26,7 @@ EXACT_PLACE_KINDS = {"house", "building", "residential", "apartments", "house_nu
 RE_PREFIX = re.compile(r"^\s*agent\s*[:\-,]?\s*", re.IGNORECASE)  # old habit; harmless to strip
 RE_EMAIL_ADDR = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 STYLE_SAMPLE = 30
+VOICE_SEND_TRIES = 10  # ~50s of polls before a reply is dropped
 
 NO_BRAIN = (
     "Sorry, my AI brain is unavailable right now (Gemini's free daily limit or an outage). "
@@ -164,6 +165,7 @@ class Agent:
         if since is None:  # first run: don't answer texts from before the server started
             since = int(self.now().timestamp())
             self.db.set("voice_since", since)
+        self._flush_voice_outbox()
         msgs = self.gmail.voice_messages(since - 60)
         st["emails_found"] = len(msgs)
         for m in msgs:
@@ -189,7 +191,22 @@ class Agent:
             )
             answer = self.reply(m["text"])
             if answer:
-                self._voice_send(answer)
+                # Queue first so a failed send is retried next poll (without re-running the AI).
+                self.db.set("voice_outbox", {"text": answer, "tries": 0})
+                self._flush_voice_outbox()
+
+    def _flush_voice_outbox(self) -> None:
+        out = self.db.get("voice_outbox")
+        if not out:
+            return
+        out["tries"] += 1
+        if out["tries"] > VOICE_SEND_TRIES:
+            log.error("giving up on a Google Voice reply after %d tries", VOICE_SEND_TRIES)
+            self.db.set("voice_outbox", None)
+            return
+        self.db.set("voice_outbox", out)
+        self._voice_send(out["text"])
+        self.db.set("voice_outbox", None)
 
     def _from_owner(self, m: dict) -> bool:
         owner = re.sub(r"\D", "", self.s.owner_phone)[-10:]
