@@ -26,7 +26,9 @@ EXACT_PLACE_KINDS = {"house", "building", "residential", "apartments", "house_nu
 RE_PREFIX = re.compile(r"^\s*agent\s*[:\-,]?\s*", re.IGNORECASE)  # old habit; harmless to strip
 RE_EMAIL_ADDR = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 STYLE_SAMPLE = 30
-VOICE_SEND_TRIES = 10  # ~50s of polls before a reply is dropped
+VOICE_SEND_TRIES = 10
+TRIP_MODES = ("walk", "bike", "drive")
+MAX_TRIP_STOPS = 10  # ~50s of polls before a reply is dropped
 
 NO_BRAIN = (
     "Sorry, my AI brain is unavailable right now (Gemini's free daily limit or an outage). "
@@ -296,33 +298,70 @@ class Agent:
         self.db.set_pending(kind, payload, self.now() + timedelta(minutes=self.s.confirm_ttl_minutes))
 
     # ---- location
-    def _tool_set_location(self, ctx: dict, place: str) -> dict:
+    def _find_place(self, place: str) -> dict:
+        """{"lat", "lon", "label", optional "warning"} or {"error"}."""
         coords = parse_coordinates(place)
-        approximate = None
         if coords:
             lat, lon = coords
-            label = f"{lat:.6f}, {lon:.6f}"
-        else:
-            if self.geocoder is None:
-                return {"error": "no geocoder configured"}
-            hit = self.geocoder.lookup(place)
-            if hit is None:
-                return {
-                    "error": f"Couldn't find '{place}'. For an exact spot, the user can long-press "
-                    "it in Apple/Google Maps and send the coordinates or the share link."
-                }
-            lat, lon, label = hit["lat"], hit["lon"], hit["label"]
-            if hit.get("kind") and hit["kind"] not in EXACT_PLACE_KINDS:
-                approximate = (
-                    f"This matched a {hit['kind']}, not an exact building, so it may be off. "
-                    "Coordinates or a maps pin are exact."
-                )
+            return {"lat": lat, "lon": lon, "label": f"{lat:.6f}, {lon:.6f}"}
+        if self.geocoder is None:
+            return {"error": "no geocoder configured"}
+        hit = self.geocoder.lookup(place)
+        if hit is None:
+            return {
+                "error": f"Couldn't find '{place}'. For an exact spot, the user can long-press "
+                "it in Apple/Google Maps and send the coordinates or the share link."
+            }
+        out = {"lat": hit["lat"], "lon": hit["lon"], "label": hit["label"]}
+        if hit.get("kind") and hit["kind"] not in EXACT_PLACE_KINDS:
+            out["warning"] = (
+                f"'{hit['label']}' matched a {hit['kind']}, not an exact building, so it may be off. "
+                "Coordinates or a maps pin are exact."
+            )
+        return out
+
+    def _tool_set_location(self, ctx: dict, place: str) -> dict:
+        hit = self._find_place(place)
+        if "error" in hit:
+            return hit
+        lat, lon, label, approximate = hit["lat"], hit["lon"], hit["label"], hit.get("warning")
         if not self.helper_online():
             return self._helper_offline()
         self._prepare("location", {"lat": lat, "lon": lon, "label": label, "summary": label}, ctx)
         out = {"status": "prepared, ask the user to confirm", "place": label, "lat": lat, "lon": lon}
         if approximate:
             out["warning"] = approximate
+        return out
+
+    def _tool_travel(self, ctx: dict, stops: list, mode: str = "drive", loop: bool = False) -> dict:
+        if mode not in TRIP_MODES:
+            mode = "drive"
+        found, warnings = [], []
+        last = self.db.get("last_location")
+        if last and not last.get("moving"):
+            found.append({"lat": last["lat"], "lng": last["lon"], "name": last["label"], "dwell_s": 0})
+        for st in stops[:MAX_TRIP_STOPS]:
+            hit = self._find_place(str(st.get("place", "")))
+            if "error" in hit:
+                return hit
+            if "warning" in hit:
+                warnings.append(hit["warning"])
+            dwell = max(0.0, float(st.get("minutes") or 0)) * 60
+            found.append({"lat": hit["lat"], "lng": hit["lon"], "name": hit["label"], "dwell_s": int(dwell)})
+        if len(found) < 2:
+            return {"error": "A trip needs a start and a destination. Ask where to start from."}
+        if not self.helper_online():
+            return self._helper_offline()
+        summary = f"{mode} via " + " -> ".join(f["name"] for f in found)
+        self._prepare("trip", {"stops": found, "mode": mode, "loop": bool(loop), "summary": summary}, ctx)
+        out = {
+            "status": "prepared, ask the user to confirm",
+            "mode": mode,
+            "loop": bool(loop),
+            "stops": [{"place": f["name"], "stay_minutes": f["dwell_s"] // 60} for f in found],
+        }
+        if warnings:
+            out["warnings"] = warnings
         return out
 
     def _tool_clear_location(self, ctx: dict) -> dict:
@@ -344,7 +383,10 @@ class Agent:
             self._awaiting.discard(cid)
             cmd = self.db.get_helper_command(cid) or {"status": "queued", "detail": ""}
         if cmd["status"] == "done":
-            return {"status": "done", "place": payload.get("label", "real location")}
+            out = {"status": "done", "place": payload.get("label", "real location")}
+            if action == "trip":
+                out["detail"] = cmd["detail"]
+            return out
         if cmd["status"] == "failed":
             return {"status": "failed", "detail": cmd["detail"]}
         return {
@@ -408,6 +450,14 @@ class Agent:
         if pending["kind"] == "email":
             self.gmail.send(p["to"], p["subject"], p["body"])
             return {"status": "sent", "to": p["to"]}
+        if pending["kind"] == "trip":
+            if not self.helper_online():
+                return self._helper_offline()
+            dest = p["stops"][-1]
+            label = f"on a {p['mode']} to {dest['name']}" + (" (looping)" if p["loop"] else "")
+            return self._run_helper(
+                "trip", {"stops": p["stops"], "mode": p["mode"], "loop": p["loop"], "label": label}
+            )
         if pending["kind"] == "location":
             if not self.helper_online():
                 return self._helper_offline()
@@ -496,6 +546,10 @@ class Agent:
             return
         if cmd["action"] == "set" and ok:
             self.db.set("last_location", cmd["payload"])
+        elif cmd["action"] == "trip" and ok:
+            dest = cmd["payload"]["stops"][-1]
+            self.db.set("last_location", {"lat": dest["lat"], "lon": dest["lng"],
+                                          "label": cmd["payload"]["label"], "moving": True})
         elif cmd["action"] == "clear" and ok:
             self.db.set("last_location", None)
         if awaited:
@@ -505,6 +559,12 @@ class Agent:
                 f"Location set: {cmd['payload']['label']}. Check Find My to see it."
                 if ok
                 else f"Couldn't set the location: {detail}"
+            )
+        elif cmd["action"] == "trip":
+            self.notify(
+                f"Trip started: {cmd['payload']['label']} ({detail})."
+                if ok
+                else f"Couldn't start the trip: {detail}"
             )
         elif cmd["action"] == "clear":
             self.notify(

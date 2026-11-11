@@ -169,16 +169,18 @@ A regular shortcut: **Ask for Input** (Text) → **Get Contents of URL** (same a
 3. Plug the iPhone in with USB, unlock it, and tap **Trust**.
 4. Developer Mode: if *Settings → Privacy & Security → Developer Mode* isn't visible, run
    `.\.venv\Scripts\python -m pymobiledevice3 amfi reveal-developer-mode`. Then turn it on; the phone restarts.
-5. In a terminal opened with **Run as administrator** (keep it open), start the tunnel:
-   ```powershell
-   .\.venv\Scripts\python -m pymobiledevice3 remote tunneld
-   ```
-6. In a normal terminal, do a dry run first, then the real thing:
+5. In a normal terminal (no admin needed), do a dry run first, then the real thing:
    ```powershell
    .\.venv\Scripts\python location_helper.py --server https://APP.onrender.com --key HELPER_KEY --dry-run
    .\.venv\Scripts\python location_helper.py --server https://APP.onrender.com --key HELPER_KEY
    ```
-   Press `Ctrl+C` to stop the helper. It clears the fake location on exit.
+   Press `Ctrl+C` to stop the helper. It clears the fake location on exit. Keep it running: the phone
+   drops the fake location as soon as the connection closes. The first run downloads Apple's developer
+   disk image (about a minute).
+
+Besides `put me at <place>`, you can text trips, e.g. `drive to the library, stay 30 min, then walk to
+blue bottle`. The location then moves along real roads (corners, lights, stops, small GPS drift), using
+the motion engine from whereverwhenever.
 
 **Safety:** install pymobiledevice3 only through the pip command above. **Turn Developer Mode off after your
 demo.** Restarting the phone also clears any fake location.
@@ -194,52 +196,12 @@ browsing data. Text `where am i?` with the VPN off, then on, and compare the IP 
 - [ ] Text yourself anything → exactly one reply arrives
 - [ ] `put me at <a test address>` → it tells you what it found → `yes` → it confirms the move
 - [ ] **Find My** (on another device or icloud.com/find) shows the new spot
+- [ ] `walk to <a nearby place>` → `yes` → the location moves along the street over a few minutes
 - [ ] `give me my real location back` → it confirms, and Find My is back to normal
 - [ ] `where am i?` with the VPN off and then on shows different IP locations
 - [ ] `what's in my email?` and `remind me to test in 5 minutes` work
 - [ ] Afterwards: stop the helper and turn Developer Mode off
 
-## 9. Experimental: change location from anywhere (Tailscale VPN)
+## 9. Change location from anywhere
 
-This tries to let the laptop at home reach the phone while you're out, so the agent can move the location
-without a cable. **It may not work.** The laptop finds the phone with Bonjour (local-network discovery),
-which normally doesn't cross a VPN, and Apple may only allow these developer connections on the local
-network. Steps 1–3 work on their own (Wi-Fi at home), so do them first.
-
-1. **Let Windows discover devices on your home Wi-Fi.** In an *Administrator* PowerShell:
-   ```powershell
-   Set-NetConnectionProfile -InterfaceAlias "Wi-Fi" -NetworkCategory Private
-   ```
-2. **Allow the phone over Wi-Fi.** With the phone plugged in and unlocked:
-   ```powershell
-   cd iphone-agent\helper
-   .\.venv\Scripts\python -m pymobiledevice3 lockdown wifi-connections on
-   ```
-3. **Test at home over Wi-Fi.** Phone and laptop on the same Wi-Fi, phone unplugged and awake. Start the
-   tunnel (Administrator window), then check that the phone shows up under `"wifi"`:
-   ```powershell
-   .\.venv\Scripts\python -m pymobiledevice3 remote tunneld
-   # in a normal window:
-   .\.venv\Scripts\python -m pymobiledevice3 remote browse --timeout 8
-   ```
-   If it shows up, start the helper through the tunnel by setting your phone's UDID first (find it with
-   `pymobiledevice3 usbmux list` while plugged in):
-   ```powershell
-   $env:PYMOBILEDEVICE3_TUNNEL = "YOUR-PHONE-UDID"
-   .\.venv\Scripts\python location_helper.py --server https://APP.onrender.com --key HELPER_KEY
-   ```
-   Text a location change. If it works, you're cable-free at home.
-4. **Install Tailscale** (free) on the laptop (tailscale.com/download) and the iPhone (App Store). Sign in
-   to the **same account** on both, and turn on the VPN on the phone.
-5. **Keep the laptop awake 24/7** when it's plugged into power:
-   ```powershell
-   powercfg /change standby-timeout-ac 0
-   powercfg /change hibernate-timeout-ac 0
-   ```
-   Leave it on, with the tunnel and helper windows open.
-6. **Test away from home.** Switch the phone to cellular (Wi-Fi off), keep Tailscale on, wait a minute,
-   then run `remote browse` on the laptop again (or just text a location change).
-   - **The phone shows up under "wifi" and the change works:** it works from anywhere, as long as the
-     laptop stays on and both stay connected to Tailscale.
-   - **It doesn't show up:** discovery doesn't cross the VPN. Connecting directly to the phone's
-     Tailscale address would need extra code, and Apple may still refuse the connection.
+Removed. The helper is USB only.

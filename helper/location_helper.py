@@ -1,143 +1,198 @@
-"""Laptop location helper: polls the agent server and drives pymobiledevice3.
+"""Laptop location helper: polls the agent server and drives the iPhone's simulated location over USB.
 
-Run (in a normal terminal, while `pymobiledevice3 remote tunneld` runs in an ADMIN terminal):
-    python location_helper.py --server https://YOURNAME.duckdns.org --key HELPER_KEY
+Run in a normal terminal (no admin, no tunneld) with the iPhone plugged in and unlocked:
+    python location_helper.py --server https://iphone-agent-rhf4.onrender.com --key HELPER_KEY
     python location_helper.py ... --dry-run     # log commands without touching the phone
+
+Commands from the server:
+    set   {lat, lon}                      hold one spot
+    trip  {stops:[{lat,lng,name,dwell_s}], mode, loop}
+                                          move along real roads like a person (motion.py)
+    clear {}                              back to the real location
+Keep this running: the phone drops the fake location as soon as the connection closes.
+Ctrl+C clears it.
 """
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import os
-import shutil
-import subprocess
-import sys
 import time
+from typing import Callable
 
-import httpx
+import motion
 
 log = logging.getLogger("helper")
 POLL_SECONDS = 3
-# DVT location simulation can stop when the connection closes, so `set` stays running.
-SET_STARTUP_GRACE = 6  # seconds to watch for an immediate failure
+TICK_SECONDS = 1
+KEEPALIVE_SECONDS = 10  # re-send a still pin so a dropped cable is noticed
 
 
-def pmd3_base() -> list[str]:
-    exe = shutil.which("pymobiledevice3")
-    return [exe] if exe else [sys.executable, "-m", "pymobiledevice3"]
+class Driver:
+    """Holds what the phone should show (a pin or a moving trajectory) and keeps it applied."""
 
+    def __init__(self, session, clock: Callable[[], float] = time.time, build=None):
+        self.session = session
+        self.clock = clock
+        self.build = build or (lambda stops, mode, loop=False, log=None: motion.build(
+            stops, mode, loop=loop, log=log))
+        self.pin: tuple[float, float] | None = None
+        self.traj = None
+        self.t0 = 0.0
+        self.current: tuple[float, float] | None = None
+        self.connected = False
+        self.sent_at = 0.0
 
-class Simulator:
-    def __init__(self, dry_run: bool):
-        self.dry_run = dry_run
-        self.proc: subprocess.Popen | None = None
-        self.mounted = False
+    def target(self) -> tuple[float, float] | None:
+        if self.traj is not None:
+            el = self.clock() - self.t0
+            if not self.traj.loop:
+                el = min(el, self.traj.total_s)
+            p = self.traj.pos_at(el)
+            return p["lat"], p["lng"]
+        return self.pin
 
-    def _run(self, args: list[str], timeout: int = 60) -> tuple[bool, str]:
-        cmd = pmd3_base() + args
-        log.info("run: %s", " ".join(cmd))
-        if self.dry_run:
-            return True, "dry run"
+    async def _apply(self) -> None:
+        if not self.connected:
+            await self.session.open()
+            self.connected = True
+            self.current = None  # re-apply after a reconnect
+        pt = self.target()
+        if pt is not None and (pt != self.current or self.clock() - self.sent_at >= KEEPALIVE_SECONDS):
+            await self.session.set(*pt)
+            self.current, self.sent_at = pt, self.clock()
+
+    async def _drop(self) -> None:
+        self.connected = False
+        self.current = None
+        await self.session.close()
+
+    async def step(self) -> bool:
+        """Push the current point to the phone. False if the link is down (caller backs off)."""
+        if self.target() is None:
+            return True
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        except subprocess.TimeoutExpired:
-            return False, f"timed out: {' '.join(args)}"
-        out = (r.stderr or r.stdout or "").strip()
-        return r.returncode == 0, out[-400:]
+            await self._apply()
+            return True
+        except Exception as e:
+            log.warning("phone link lost: %s", e)
+            await self._drop()
+            return False
 
-    def _ensure_mounted(self) -> tuple[bool, str]:
-        if self.mounted:
-            return True, ""
-        ok, out = self._run(["mounter", "auto-mount"], timeout=180)
-        # "already mounted" is reported as an error by some versions
-        if ok or "already" in out.lower():
-            self.mounted = True
-            return True, ""
-        return False, f"developer disk image mount failed: {out}"
+    async def handle(self, cmd: dict) -> tuple[bool, str]:
+        action, p = cmd.get("action"), cmd.get("payload") or {}
+        try:
+            if action == "set":
+                self.traj, self.pin = None, (float(p["lat"]), float(p["lon"]))
+                await self._apply()
+                return True, "set"
+            if action == "trip":
+                stops = [motion.Stop(float(s["lat"]), float(s["lng"]), s.get("name", ""), float(s.get("dwell_s", 0)))
+                         for s in p["stops"]]
+                traj = await asyncio.to_thread(self.build, stops, p.get("mode", "drive"),
+                                               loop=bool(p.get("loop")), log=log.info)
+                self.pin, self.traj, self.t0 = None, traj, self.clock()
+                await self._apply()
+                straight = sum(1 for leg in traj.legs if leg.straight)
+                detail = f"{p.get('mode', 'drive')}, about {max(1, round(traj.total_s / 60))} min"
+                if p.get("loop"):
+                    detail += ", looping"
+                if straight:
+                    detail += f", {straight} leg(s) in a straight line (no road route found)"
+                return True, detail
+            if action == "clear":
+                self.pin = self.traj = None
+                await self.session.clear()
+                await self._drop()
+                return True, "cleared"
+            return False, f"unknown action {action}"
+        except Exception as e:
+            await self._drop()
+            if action == "set":
+                self.pin = None
+            elif action == "trip":
+                self.traj = None
+            return False, f"{type(e).__name__}: {e}"[:400]
 
-    def _stop(self) -> None:
-        if self.proc and self.proc.poll() is None:
-            self.proc.terminate()
+
+async def drive_loop(driver: Driver) -> None:
+    backoff = 2
+    while True:
+        if await driver.step():
+            backoff = 2
+            await asyncio.sleep(TICK_SECONDS)
+        else:
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 30)
+
+
+async def server_loop(driver: Driver, http) -> None:
+    import httpx
+
+    while True:
+        try:
+            r = await asyncio.to_thread(http.get, "/helper/poll")
+            if r.status_code == 401:
+                log.error("server rejected HELPER_KEY")
+                await asyncio.sleep(30)
+                continue
+            r.raise_for_status()
+            cmd = r.json().get("command")
+        except httpx.HTTPError as exc:
+            log.warning("server unreachable: %s", exc)
+            await asyncio.sleep(POLL_SECONDS * 3)
+            continue
+        if cmd:
+            log.info("command: %s", cmd["action"])
+            ok, detail = await driver.handle(cmd)
+            log.info("result ok=%s %s", ok, detail)
             try:
-                self.proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
-        self.proc = None
-
-    def set(self, lat: float, lon: float) -> tuple[bool, str]:
-        ok, err = self._ensure_mounted()
-        if not ok:
-            return False, err
-        self._stop()
-        cmd = pmd3_base() + ["developer", "dvt", "simulate-location", "set", "--", str(lat), str(lon)]
-        log.info("start: %s", " ".join(cmd))
-        if self.dry_run:
-            return True, "dry run"
-        self.proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
-        )
-        deadline = time.time() + SET_STARTUP_GRACE
-        while time.time() < deadline:
-            if self.proc.poll() is not None:
-                out = (self.proc.stdout.read() if self.proc.stdout else "").strip()
-                if self.proc.returncode == 0:
-                    return True, "set (process exited cleanly)"
-                return False, out[-400:] or f"exit code {self.proc.returncode}"
-            time.sleep(0.5)
-        return True, "set (simulation running)"
-
-    def clear(self) -> tuple[bool, str]:
-        self._stop()
-        return self._run(["developer", "dvt", "simulate-location", "clear"])
+                await asyncio.to_thread(
+                    http.post, "/helper/result", json={"id": cmd["id"], "ok": ok, "detail": detail}
+                )
+            except httpx.HTTPError as exc:
+                log.warning("could not report result: %s", exc)
+        await asyncio.sleep(POLL_SECONDS)
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--server", default=os.environ.get("AGENT_SERVER"), help="https://... server URL")
-    ap.add_argument("--key", default=os.environ.get("HELPER_KEY"), help="HELPER_KEY from server .env")
-    ap.add_argument("--dry-run", action="store_true")
-    args = ap.parse_args()
-    if not args.server or not args.key:
-        ap.error("--server and --key are required (or AGENT_SERVER / HELPER_KEY env vars)")
+async def amain(args) -> None:
+    import httpx
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
-    sim = Simulator(args.dry_run)
+    from device import DryRunSession, PhoneSession
+
+    session = DryRunSession() if args.dry_run else PhoneSession(args.udid)
+    driver = Driver(session)
     http = httpx.Client(
         base_url=args.server.rstrip("/"), headers={"X-Helper-Key": args.key}, timeout=15
     )
     log.info("helper running%s; Ctrl+C to stop (this clears the fake location)",
              " (DRY RUN)" if args.dry_run else "")
     try:
-        while True:
-            try:
-                r = http.get("/helper/poll")
-                if r.status_code == 401:
-                    log.error("server rejected HELPER_KEY")
-                    time.sleep(30)
-                    continue
-                r.raise_for_status()
-                cmd = r.json().get("command")
-            except httpx.HTTPError as exc:
-                log.warning("server unreachable: %s", exc)
-                time.sleep(POLL_SECONDS * 3)
-                continue
-            if cmd:
-                log.info("command: %s", cmd)
-                if cmd["action"] == "set":
-                    ok, detail = sim.set(cmd["payload"]["lat"], cmd["payload"]["lon"])
-                elif cmd["action"] == "clear":
-                    ok, detail = sim.clear()
-                else:
-                    ok, detail = False, f"unknown action {cmd['action']}"
-                log.info("result ok=%s %s", ok, detail)
-                try:
-                    http.post("/helper/result", json={"id": cmd["id"], "ok": ok, "detail": detail})
-                except httpx.HTTPError as exc:
-                    log.warning("could not report result: %s", exc)
-            time.sleep(POLL_SECONDS)
-    except KeyboardInterrupt:
+        await asyncio.gather(drive_loop(driver), server_loop(driver, http))
+    finally:
         log.info("stopping; clearing simulated location")
-        sim.clear()
+        try:
+            await session.clear()
+        except Exception:
+            pass
+        await session.close()
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--server", default=os.environ.get("AGENT_SERVER"), help="https://... server URL")
+    ap.add_argument("--key", default=os.environ.get("HELPER_KEY"), help="HELPER_KEY from server .env")
+    ap.add_argument("--udid", default=None, help="only if more than one iPhone is plugged in")
+    ap.add_argument("--dry-run", action="store_true")
+    args = ap.parse_args()
+    if not args.server or not args.key:
+        ap.error("--server and --key are required (or AGENT_SERVER / HELPER_KEY env vars)")
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+    try:
+        asyncio.run(amain(args))
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":

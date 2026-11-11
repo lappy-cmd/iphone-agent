@@ -30,10 +30,11 @@ symbols like * or #.
 Acting: use the tools to do things. Never say you did something unless a tool result confirms it.
 If a tool returns an error, explain it simply and suggest what to do.
 
-Confirmations: sending an email and changing the phone's location need the user's OK.
-- First call draft_email or set_location. That only prepares the action.
+Confirmations: sending an email and changing or moving the phone's location need the user's OK.
+- First call draft_email, set_location or travel. That only prepares the action.
 - Then tell the user exactly what will happen (for email: recipient, subject and the full body;
-  for location: the place found) and ask if you should go ahead.
+  for location: the place found; for a trip: the mode and each stop with how long to stay) and
+  ask if you should go ahead.
 - Only when the user's NEXT message agrees, call confirm_pending. If they say no, call
   cancel_pending. If they ask for changes, prepare a new draft or place.
 
@@ -84,6 +85,27 @@ TOOLS = [
         "(shown in Find My). Accepts a street address, landmark, 'lat, lon' coordinates or a "
         "maps link. Needs the user's confirmation afterwards.",
         "parameters": _obj({"place": {"type": "string"}}, ["place"]),
+    },
+    {
+        "name": "travel",
+        "description": "PREPARE moving the phone's reported location along real roads like a "
+        "person would (slowing for corners, stopping at lights, lingering at stops). Starts from "
+        "the current fake location if one is set, otherwise from the first stop. Use for 'walk/"
+        "drive/bike to X', multi-stop days, or 'go back and forth'. Needs the user's confirmation.",
+        "parameters": _obj(
+            {
+                "stops": {
+                    "type": "array",
+                    "description": "Places in order. minutes = how long to stay there.",
+                    "items": _obj(
+                        {"place": {"type": "string"}, "minutes": {"type": "number"}}, ["place"]
+                    ),
+                },
+                "mode": {"type": "string", "enum": ["walk", "bike", "drive"]},
+                "loop": {"type": "boolean", "description": "Repeat the route until stopped."},
+            },
+            ["stops"],
+        ),
     },
     {
         "name": "clear_location",

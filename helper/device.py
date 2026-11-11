@@ -1,0 +1,75 @@
+"""One USB tunnel + one location-simulation channel to the iPhone, all in-process (no admin, no tunneld).
+
+Adapted from whereverwhenever's Session (MIT, https://github.com/angadsingharora/whereverwhenever),
+USB only. The phone honours the fake location only while this channel stays open.
+"""
+from __future__ import annotations
+
+import logging
+from contextlib import AsyncExitStack
+
+log = logging.getLogger("helper")
+
+
+class PhoneSession:
+    def __init__(self, udid: str | None = None):
+        self.udid = udid
+        self.stack: AsyncExitStack | None = None
+        self.loc = None
+
+    async def open(self) -> None:
+        from pymobiledevice3.exceptions import AlreadyMountedError
+        from pymobiledevice3.remote.userspace_tunnel import UserspaceRsdTunnel
+        from pymobiledevice3.services.dvt.instruments.dvt_provider import DvtProvider
+        from pymobiledevice3.services.dvt.instruments.location_simulation import LocationSimulation
+        from pymobiledevice3.services.mobile_image_mounter import auto_mount
+
+        await self.close()
+        self.stack = AsyncExitStack()
+        log.info("connecting to the iPhone over USB...")
+        rsd = await self.stack.enter_async_context(UserspaceRsdTunnel(serial=self.udid))
+        log.info("connected: %s iOS %s", rsd.product_type, rsd.product_version)
+        try:
+            dvt = await self.stack.enter_async_context(DvtProvider(rsd))
+        except Exception as e:
+            # Developer services need Apple's developer disk image; first time it's downloaded (~1 min).
+            log.info("mounting the developer disk image (%s)...", type(e).__name__)
+            try:
+                await auto_mount(rsd)
+            except AlreadyMountedError:
+                raise e
+            dvt = await self.stack.enter_async_context(DvtProvider(rsd))
+        self.loc = await self.stack.enter_async_context(LocationSimulation(dvt))
+        log.info("location channel open")
+
+    async def set(self, lat: float, lng: float) -> None:
+        await self.loc.set(lat, lng)
+
+    async def clear(self) -> None:
+        if self.loc is None:
+            await self.open()
+        await self.loc.clear()
+
+    async def close(self) -> None:
+        if self.stack:
+            try:
+                await self.stack.aclose()
+            except Exception:
+                pass
+        self.stack = self.loc = None
+
+
+class DryRunSession:
+    """Logs instead of touching the phone."""
+
+    async def open(self) -> None:
+        log.info("(dry run) open")
+
+    async def set(self, lat: float, lng: float) -> None:
+        log.info("(dry run) location %.6f, %.6f", lat, lng)
+
+    async def clear(self) -> None:
+        log.info("(dry run) clear")
+
+    async def close(self) -> None:
+        pass

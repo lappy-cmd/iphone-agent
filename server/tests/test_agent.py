@@ -263,3 +263,49 @@ def test_codegen_pushes_to_github(agent):
     folder, files = agent.github.pushed[0]
     assert folder.endswith("demo-bot") and files[0]["path"] == "main.py"
     assert "github.com" in agent.gmail.notes[-1]
+
+
+# ---------------------------------------------------------------- trips (moving location)
+def test_trip_prepared_confirmed_and_sent_to_helper(online):
+    a = online
+    stops = [{"place": "37.33, -122.03", "minutes": 0}, {"place": "37.35, -122.01", "minutes": 30}]
+    a.llm.turn(("call", "travel", {"stops": stops, "mode": "walk"}), ("say", "go?"))
+    a.handle("walk me from here to there and stay 30 min")
+    r = last_result(a)
+    assert r["status"].startswith("prepared") and [s["place"] for s in r["stops"]] == [
+        "37.330000, -122.030000", "37.350000, -122.010000"]
+    seen = []
+
+    def sleep(_):
+        cmd = a.helper_poll()
+        if cmd:
+            seen.append(cmd)
+            a.helper_result(cmd["id"], True, "moving, about 12 min")
+    a.sleep = sleep
+    a.llm.turn(("call", "confirm_pending", {}), ("say", "on my way"))
+    a.handle("yes")
+    assert last_result(a)["status"] == "done"
+    [cmd] = seen
+    assert cmd["action"] == "trip" and cmd["payload"]["mode"] == "walk"
+    assert cmd["payload"]["stops"][1] == {"lat": 37.35, "lng": -122.01, "name": "37.350000, -122.010000",
+                                         "dwell_s": 1800}
+    a.llm.turn(("call", "where_am_i", {}))
+    a.handle("where am i")
+    assert "on a walk" in last_result(a)["fake_location"]["place"]
+
+
+def test_trip_starts_from_current_fake_location(online):
+    online.db.set("last_location", {"lat": 1.0, "lon": 2.0, "label": "Home"})
+    online.llm.turn(("call", "travel", {"stops": [{"place": "3, 4"}], "mode": "drive"}))
+    online.handle("drive to 3, 4")
+    assert [s["place"] for s in last_result(online)["stops"]] == ["Home", "3.000000, 4.000000"]
+
+
+def test_trip_needs_two_points_and_valid_places(online):
+    online.llm.turn(("call", "travel", {"stops": [{"place": "3, 4"}]}))
+    online.handle("go to 3, 4")
+    assert "start" in last_result(online)["error"]
+    online.geocoder = FakeGeocoder(None)
+    online.llm.turn(("call", "travel", {"stops": [{"place": "1, 2"}, {"place": "nowhere 999"}]}))
+    online.handle("go")
+    assert "Couldn't find" in last_result(online)["error"]
