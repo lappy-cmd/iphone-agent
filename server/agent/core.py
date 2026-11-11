@@ -72,7 +72,10 @@ class Agent:
         # Google Voice diagnostics shown on /health (no message text, numbers or addresses).
         self.voice_status: dict = {"enabled": self.voice_enabled(), "polls": 0, "last_poll": None,
                                    "emails_found": 0, "answered": 0, "ignored_other_number": 0,
-                                   "skipped_old": 0, "last_error": None}
+                                   "skipped_old": 0, "last_error": None,
+                                   "started": self.now().isoformat(timespec="seconds"),
+                                   "last_text_received": None, "last_text_seen": None,
+                                   "last_reply_sent": None}
 
     # ------------------------------------------------------------------ helpers
     def now(self) -> datetime:
@@ -166,12 +169,16 @@ class Agent:
             since = int(self.now().timestamp())
             self.db.set("voice_since", since)
         self._flush_voice_outbox()
-        msgs = self.gmail.voice_messages(since - 60)
+        # Only look at mail newer than what we've already handled (minus slack for clock skew).
+        after = max(since, (self.db.get("voice_cursor") or 0) // 1000)
+        msgs = self.gmail.voice_messages(after - 60)
         st["emails_found"] = len(msgs)
         for m in msgs:
             if m["internal_ms"] < since * 1000:
                 st["skipped_old"] += 1
                 continue
+            if m["internal_ms"] > (self.db.get("voice_cursor") or 0):
+                self.db.set("voice_cursor", m["internal_ms"])
             if not self.db.mark_seen(m["id"]):
                 continue
             if not self._from_owner(m):
@@ -179,6 +186,8 @@ class Agent:
                 log.info("ignoring a Google Voice text from a number that isn't OWNER_PHONE")
                 continue
             st["answered"] += 1
+            st["last_text_received"] = self._stamp(datetime.fromtimestamp(m["internal_ms"] / 1000, timezone.utc))
+            st["last_text_seen"] = self._stamp(self.now())
             log.info("answering a Google Voice text")
             self.db.set(
                 "voice_thread",
@@ -205,8 +214,13 @@ class Agent:
             self.db.set("voice_outbox", None)
             return
         self.db.set("voice_outbox", out)
-        self._voice_send(out["text"])
+        if self._voice_send(out["text"]):
+            self.voice_status["last_reply_sent"] = self._stamp(self.now())
         self.db.set("voice_outbox", None)
+
+    @staticmethod
+    def _stamp(t: datetime) -> str:
+        return t.astimezone(timezone.utc).isoformat(timespec="seconds")
 
     def _from_owner(self, m: dict) -> bool:
         owner = re.sub(r"\D", "", self.s.owner_phone)[-10:]

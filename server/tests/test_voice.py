@@ -117,3 +117,19 @@ def test_failed_reply_is_resent_next_poll_without_rerunning_ai(voice):
     assert voice.voice_status["answered"] == 1
     voice.poll_voice()
     assert len(voice.gmail.voice_sent) == 1
+
+
+def test_poll_only_fetches_new_mail_and_reports_timing(voice):
+    asked = []
+    real = voice.gmail.voice_messages
+
+    def spy(after_epoch):
+        asked.append(after_epoch)
+        return real(after_epoch)
+    voice.gmail.voice_messages = spy
+    voice.gmail.voice_inbox = [gv("m1", "hi", now_ms(voice, 500))]
+    voice.poll_voice()
+    voice.poll_voice()
+    assert asked[1] >= now_ms(voice, 500) // 1000 - 60  # window moved past handled mail
+    st = voice.voice_status
+    assert st["started"] and st["last_text_received"] and st["last_text_seen"] and st["last_reply_sent"]
