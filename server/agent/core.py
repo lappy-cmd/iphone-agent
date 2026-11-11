@@ -68,6 +68,10 @@ class Agent:
         self.tz = ZoneInfo(settings.timezone)
         self._lock = threading.Lock()
         self._awaiting: set[int] = set()  # helper commands a /message request is waiting on
+        # Google Voice diagnostics shown on /health (no message text, numbers or addresses).
+        self.voice_status: dict = {"enabled": self.voice_enabled(), "polls": 0, "last_poll": None,
+                                   "emails_found": 0, "answered": 0, "ignored_other_number": 0,
+                                   "skipped_old": 0, "last_error": None}
 
     # ------------------------------------------------------------------ helpers
     def now(self) -> datetime:
@@ -140,18 +144,40 @@ class Agent:
 
     def poll_voice(self) -> None:
         """Answer new Google Voice texts (forwarded to Gmail) from the owner's number."""
-        if not self.voice_enabled():
+        st = self.voice_status
+        st["enabled"] = self.voice_enabled()
+        if not st["enabled"]:
             return
+        st["polls"] += 1
+        st["last_poll"] = self.now().isoformat(timespec="seconds")
+        try:
+            self._poll_voice()
+        except Exception as exc:
+            status = getattr(getattr(exc, "resp", None), "status", None)
+            st["last_error"] = f"{type(exc).__name__}{f' {status}' if status else ''} at {st['last_poll']}"
+            raise
+
+    def _poll_voice(self) -> None:
+        st = self.voice_status
+        st["skipped_old"] = 0  # per poll
         since = self.db.get("voice_since")
         if since is None:  # first run: don't answer texts from before the server started
             since = int(self.now().timestamp())
             self.db.set("voice_since", since)
-        for m in self.gmail.voice_messages(since - 60):
-            if m["internal_ms"] < since * 1000 or not self.db.mark_seen(m["id"]):
+        msgs = self.gmail.voice_messages(since - 60)
+        st["emails_found"] = len(msgs)
+        for m in msgs:
+            if m["internal_ms"] < since * 1000:
+                st["skipped_old"] += 1
+                continue
+            if not self.db.mark_seen(m["id"]):
                 continue
             if not self._from_owner(m):
+                st["ignored_other_number"] += 1
                 log.info("ignoring a Google Voice text from a number that isn't OWNER_PHONE")
                 continue
+            st["answered"] += 1
+            log.info("answering a Google Voice text")
             self.db.set(
                 "voice_thread",
                 {

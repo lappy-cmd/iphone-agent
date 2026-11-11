@@ -78,3 +78,20 @@ def test_voice_text_and_plain_body():
         {"mimeType": "text/plain", "body": {"data": data}},
     ]}
     assert voice_text(_plain_body(payload)) == "hello"
+
+
+def test_voice_status_reports_progress_and_errors(voice):
+    stranger = '"(650) 111-2222" <14085550000.16501112222.x@txt.voice.google.com>'
+    voice.gmail.voice_inbox = [gv("old", "x", now_ms(voice, -600)), gv("m1", "hi", now_ms(voice, 5)),
+                               gv("s1", "hi", now_ms(voice, 5), sender=stranger, subject="New text message")]
+    voice.poll_voice()
+    st = voice.voice_status
+    assert st["enabled"] and st["polls"] == 1 and st["emails_found"] == 3
+    assert (st["answered"], st["ignored_other_number"], st["skipped_old"]) == (1, 1, 1)
+
+    def boom(after_epoch):
+        raise RuntimeError("no network")
+    voice.gmail.voice_messages = boom
+    with pytest.raises(RuntimeError):
+        voice.poll_voice()
+    assert st["last_error"].startswith("RuntimeError at ")

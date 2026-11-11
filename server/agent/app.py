@@ -100,7 +100,7 @@ def create_app(agent: Agent, run_scheduler: bool = True) -> FastAPI:
 
     @app.get("/health")
     def health() -> dict:
-        return {"ok": True, "helper_online": agent.helper_online()}
+        return {"ok": True, "helper_online": agent.helper_online(), "voice": agent.voice_status}
 
     @app.post("/message", response_class=PlainTextResponse)
     def message(body: MessageIn, request: Request, x_agent_key: str | None = Header(default=None)):
