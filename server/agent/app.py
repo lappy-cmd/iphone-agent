@@ -111,7 +111,12 @@ def create_app(agent: Agent, run_scheduler: bool = True) -> FastAPI:
 
     @app.get("/health")
     def health() -> dict:
-        return {"ok": True, "helper_online": agent.helper_online(), "voice": agent.voice_status}
+        return {
+            "ok": True,
+            "helper_online": agent.helper_online(),
+            "imessage_online": agent.imessage_online(),
+            "voice": agent.voice_status,
+        }
 
     @app.post("/message", response_class=PlainTextResponse)
     def message(body: MessageIn, request: Request, x_agent_key: str | None = Header(default=None)):
@@ -119,6 +124,20 @@ def create_app(agent: Agent, run_scheduler: bool = True) -> FastAPI:
         fwd = request.headers.get("x-forwarded-for", "")
         ip = fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else None)
         return agent.handle(body.text, client_ip=ip)
+
+    def agent_auth(x_agent_key: str | None = Header(default=None)) -> None:
+        _check(x_agent_key, agent.s.agent_key)
+
+    @app.post("/imessage/message", dependencies=[Depends(agent_auth)])
+    def imessage_message(body: MessageIn, request: Request) -> dict:
+        """Mac bridge: one iMessage in, the plain reply out ('' means send nothing)."""
+        fwd = request.headers.get("x-forwarded-for", "")
+        ip = fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else None)
+        return {"reply": agent.reply(body.text, client_ip=ip)}
+
+    @app.get("/imessage/outbox", dependencies=[Depends(agent_auth)])
+    def imessage_outbox() -> dict:
+        return {"messages": agent.imessage_outbox()}
 
     @app.get("/helper/poll", dependencies=[Depends(helper_auth)])
     def helper_poll() -> dict:

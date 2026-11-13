@@ -96,7 +96,21 @@ The server creates its tables on first start.
 
 Updating the server later: push to GitHub and Render redeploys automatically. Your data is safe in Turso.
 
-## 5. Texting the AI (Google Voice, recommended)
+## 5. Texting the AI (iMessage via your Mac, recommended)
+
+The agent gets its own iMessage contact (blue bubbles, replies in seconds). Your Mac stays plugged in and awake.
+
+1. **Apple ID for the agent:** create a new Apple ID (appleid.apple.com) and on the Mac sign into **Messages** with it.
+   Its email is the agent's iMessage address. (Without a SIM it can't have its own phone number.)
+2. **BlueBubbles Server:** download from **bluebubbles.app** and install it. Give it Full Disk Access and Accessibility when it asks.
+   Set a password. Skip the Private API. For the connection/proxy step pick anything (the bridge talks to it on `localhost`).
+3. **Bridge:** copy this repo's `imessage` folder to the Mac. In it, copy `.env.example` to `.env` and fill it in
+   (`OWNER` is the number/email you text from). Then in Terminal: `cd` into the folder, `sh install.sh`.
+4. **On your iPhone:** add a contact "Agent" with the agent's Apple ID email and text it "hi".
+   `/health` shows `imessage_online: true` while the bridge runs. Log: `imessage/bridge.log` on the Mac.
+5. Turn off the old routes: delete `OWNER_PHONE` in Render (stops Google Voice) and turn off the Shortcuts automations.
+
+## 5a. Old: Texting the AI (Google Voice)
 
 The AI gets its own free phone number, so you text it like a person: one bubble for you, one for the
 reply. Google Voice forwards each text to your Gmail; the server reads it, and its email reply goes back to

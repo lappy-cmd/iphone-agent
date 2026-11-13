@@ -96,3 +96,19 @@ def test_census_then_osm_chain():
     assert chain.lookup("999 Nowhere Rd")["label"] == "osm"  # census miss -> OSM
     assert chain.lookup("Times Square")["label"] == "osm"  # not a street address -> OSM only
     assert osm.queries == ["999 Nowhere Rd", "Times Square"]
+
+
+def test_imessage_endpoints(client, agent):
+    assert client.post("/imessage/message", json={"text": "hi"}).status_code == 401
+    r = client.post("/imessage/message", json={"text": "hi"}, headers={"X-Agent-Key": "AK"})
+    assert r.status_code == 200 and r.json()["reply"] == "answer to: hi"  # no self-chat marker
+
+    assert agent.imessage_online() is False
+    agent.notify("before bridge")  # bridge offline: goes the old way, not queued
+    assert client.get("/imessage/outbox", headers={"X-Agent-Key": "AK"}).json() == {"messages": []}
+    assert client.get("/health").json()["imessage_online"] is True
+
+    agent.notify("reminder: dentist")
+    out = client.get("/imessage/outbox", headers={"X-Agent-Key": "AK"}).json()
+    assert out == {"messages": ["reminder: dentist"]}
+    assert client.get("/imessage/outbox", headers={"X-Agent-Key": "AK"}).json() == {"messages": []}

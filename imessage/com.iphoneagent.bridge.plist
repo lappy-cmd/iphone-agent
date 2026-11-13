@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Starts the bridge at login and restarts it if it stops. install.sh fills in BRIDGE_DIR. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.iphoneagent.bridge</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>BRIDGE_DIR/bridge.py</string>
+  </array>
+  <key>WorkingDirectory</key><string>BRIDGE_DIR</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>BRIDGE_DIR/bridge.log</string>
+  <key>StandardErrorPath</key><string>BRIDGE_DIR/bridge.log</string>
+</dict>
+</plist>

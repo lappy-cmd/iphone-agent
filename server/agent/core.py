@@ -91,8 +91,29 @@ class Agent:
         loc = self.local(dt)
         return f"{loc:%a %b} {loc.day} {loc.strftime('%I:%M %p').lstrip('0')}"
 
+    IMESSAGE_OFFLINE_SECONDS = 60
+
+    def imessage_online(self) -> bool:
+        seen = self.db.get("imessage_last_seen")
+        return bool(seen) and self.now() - datetime.fromisoformat(seen) < timedelta(
+            seconds=self.IMESSAGE_OFFLINE_SECONDS
+        )
+
+    def imessage_outbox(self) -> list[str]:
+        """Called by the Mac bridge every few seconds: hand over queued notifications."""
+        with self._lock:
+            self.db.set("imessage_last_seen", self.now().isoformat())
+            out = self.db.get("imessage_outbox") or []
+            if out:
+                self.db.set("imessage_outbox", [])
+        return out
+
     def notify(self, text: str) -> None:
-        """Proactive text: through Google Voice when set up, else email -> 'Agent Out' -> iMessage."""
+        """Proactive text: iMessage (Mac bridge) if it's running, else Google Voice, else email."""
+        if self.imessage_online():
+            with self._lock:
+                self.db.set("imessage_outbox", (self.db.get("imessage_outbox") or []) + [text])
+            return
         if self.gmail is None:
             log.warning("notify without gmail: %s", text)
             return

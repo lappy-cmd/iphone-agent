@@ -125,12 +125,12 @@ class ClaudeLLM(_Tasks):
 
     def _call(self, effort: str = "low", max_tokens: int = 16000, **kw):
         a = self._anthropic
+        if "haiku" not in self._model:  # Haiku has no server-side refusal fallback
+            kw.update(betas=self.BETAS, fallbacks="default")
         try:
             with self._client.beta.messages.stream(
                 model=self._model,
                 max_tokens=max_tokens,
-                betas=self.BETAS,
-                fallbacks="default",
                 output_config={"effort": effort, **kw.pop("output_config", {})},
                 **kw,
             ) as stream:
