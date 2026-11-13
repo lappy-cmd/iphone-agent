@@ -1,7 +1,9 @@
-"""One USB tunnel + one location-simulation channel to the iPhone, all in-process (no admin, no tunneld).
+"""One tunnel + one location-simulation channel to the iPhone, all in-process (no admin, no tunneld).
 
-Adapted from whereverwhenever's Session (MIT, https://github.com/angadsingharora/whereverwhenever),
-USB only. The phone honours the fake location only while this channel stays open.
+Adapted from whereverwhenever's Session (MIT, https://github.com/angadsingharora/whereverwhenever).
+Over USB by default. With `host` set (the phone's IP, e.g. its Tailscale 100.x address) it connects over
+the network instead, using the trust pairing made over USB. The phone honours the fake location only
+while this channel stays open.
 """
 from __future__ import annotations
 
@@ -11,9 +13,41 @@ from contextlib import AsyncExitStack
 log = logging.getLogger("helper")
 
 
+def _network_provider(host: str):
+    """Replacement for pymobiledevice3's USB tunnel-provider lookup: lockdown over TCP to `host`."""
+
+    async def provider(serial, autopair, remotepairing_fallback=True):
+        from pymobiledevice3.lockdown import create_using_tcp
+        from pymobiledevice3.remote.tunnel_service import CoreDeviceTunnelProxy
+
+        lockdown = await create_using_tcp(host, identifier=serial, autopair=False, keep_alive=True)
+        try:
+            return await CoreDeviceTunnelProxy.create(lockdown), lockdown
+        except BaseException:
+            await lockdown.close()
+            raise
+
+    return provider
+
+
+async def enable_network_access(udid: str | None = None) -> str:
+    """Over USB: allow this computer to reach the phone over the network. Returns the phone's UDID."""
+    from pymobiledevice3.lockdown import create_using_usbmux
+
+    lockdown = await create_using_usbmux(serial=udid)
+    try:
+        await lockdown.set_enable_wifi_connections(True)
+        return lockdown.udid
+    finally:
+        await lockdown.close()
+
+
 class PhoneSession:
-    def __init__(self, udid: str | None = None):
+    def __init__(self, udid: str | None = None, host: str | None = None):
+        if host and not udid:
+            raise ValueError("connecting over the network needs the phone's UDID (run --setup-remote)")
         self.udid = udid
+        self.host = host
         self.stack: AsyncExitStack | None = None
         self.loc = None
 
@@ -26,7 +60,14 @@ class PhoneSession:
 
         await self.close()
         self.stack = AsyncExitStack()
-        log.info("connecting to the iPhone over USB...")
+        if self.host:
+            from pymobiledevice3.remote import userspace_tunnel
+
+            # One tunnel per process, so swapping the module's provider lookup is safe here.
+            userspace_tunnel._create_no_root_tunnel_provider = _network_provider(self.host)
+            log.info("connecting to the iPhone over the network at %s...", self.host)
+        else:
+            log.info("connecting to the iPhone over USB...")
         rsd = await self.stack.enter_async_context(UserspaceRsdTunnel(serial=self.udid))
         log.info("connected: %s iOS %s", rsd.product_type, rsd.product_version)
         try:

@@ -162,7 +162,7 @@ async def amain(args) -> None:
 
     from device import DryRunSession, PhoneSession
 
-    session = DryRunSession() if args.dry_run else PhoneSession(args.udid)
+    session = DryRunSession() if args.dry_run else PhoneSession(args.udid, args.host)
     driver = Driver(session)
     http = httpx.Client(
         base_url=args.server.rstrip("/"), headers={"X-Helper-Key": args.key}, timeout=15
@@ -180,6 +180,29 @@ async def amain(args) -> None:
         await session.close()
 
 
+ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+
+
+def save_env_value(path: str, key: str, value: str) -> None:
+    """Set KEY=value in helper/.env, keeping every other line."""
+    try:
+        lines = open(path, encoding="utf-8-sig").read().splitlines()
+    except OSError:
+        lines = []
+    lines = [ln for ln in lines if ln.partition("=")[0].strip() != key] + [f"{key}={value}"]
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines) + "\n")
+
+
+async def setup_remote(udid: str | None) -> None:
+    from device import enable_network_access
+
+    udid = await enable_network_access(udid)
+    save_env_value(ENV_PATH, "PHONE_UDID", udid)
+    log.info("network access enabled and PHONE_UDID saved to helper/.env")
+    log.info("now add PHONE_HOST=<your iPhone's Tailscale IP> to helper/.env")
+
+
 def load_env_file(path: str) -> None:
     """Read KEY=VALUE lines (AGENT_SERVER, HELPER_KEY) from helper/.env without overriding real env vars."""
     try:
@@ -193,13 +216,25 @@ def load_env_file(path: str) -> None:
 
 
 def main() -> None:
-    load_env_file(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+    load_env_file(ENV_PATH)
     ap = argparse.ArgumentParser()
     ap.add_argument("--server", default=os.environ.get("AGENT_SERVER"), help="https://... server URL")
     ap.add_argument("--key", default=os.environ.get("HELPER_KEY"), help="HELPER_KEY from server .env")
-    ap.add_argument("--udid", default=None, help="only if more than one iPhone is plugged in")
+    ap.add_argument("--udid", default=os.environ.get("PHONE_UDID"),
+                    help="the phone's ID (needed for --host; --setup-remote saves it)")
+    ap.add_argument("--host", default=os.environ.get("PHONE_HOST"),
+                    help="connect over the network to this phone IP (its Tailscale 100.x address)")
+    ap.add_argument("--usb", action="store_true", help="ignore PHONE_HOST and use the cable")
+    ap.add_argument("--setup-remote", action="store_true",
+                    help="one time, phone plugged in: allow network connections and save PHONE_UDID")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
+    if args.usb:
+        args.host = None
+    if args.setup_remote:
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+        asyncio.run(setup_remote(args.udid))
+        return
     if not args.server or not args.key:
         ap.error("--server and --key are required (or AGENT_SERVER / HELPER_KEY env vars)")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")

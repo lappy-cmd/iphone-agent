@@ -362,8 +362,8 @@ class Agent:
 
     def _helper_offline(self) -> dict:
         return {
-            "error": "The laptop helper is offline, so the location can't change. Turn on the "
-            "laptop, plug in the phone, and start the tunnel and location_helper.py."
+            "error": "The laptop helper is offline, so the location can't change. The laptop must be "
+            "on with location_helper.py running, and the phone reachable (USB, or Tailscale on)."
         }
 
     def _prepare(self, kind: str, payload: dict, ctx: dict) -> None:

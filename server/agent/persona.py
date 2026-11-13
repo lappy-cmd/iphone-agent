@@ -63,8 +63,8 @@ def system_prompt(
         + (
             "online (location changes work)."
             if helper_online
-            else "OFFLINE. Location changes won't work until the user turns on the laptop, "
-            "plugs in the phone and starts the helper."
+            else "OFFLINE. Location changes won't work until the laptop helper is running and can "
+            "reach the phone (USB cable, or Tailscale when away)."
         ),
     ]
     if pending:

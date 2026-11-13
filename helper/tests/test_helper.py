@@ -113,3 +113,24 @@ def test_env_file_fills_missing_settings(tmp_path, monkeypatch):
     import os
     assert os.environ["HELPER_KEY"] == "abc" and os.environ["AGENT_SERVER"] == "https://real"
     load_env_file(str(tmp_path / "missing"))
+
+
+def test_save_env_value_keeps_other_lines(tmp_path):
+    import location_helper as lh
+
+    env = tmp_path / ".env"
+    env.write_text("AGENT_SERVER=https://x\nPHONE_UDID=old\nHELPER_KEY=k\n", encoding="utf-8")
+    lh.save_env_value(str(env), "PHONE_UDID", "NEW")
+    assert env.read_text(encoding="utf-8").splitlines() == [
+        "AGENT_SERVER=https://x", "HELPER_KEY=k", "PHONE_UDID=NEW"]
+
+
+def test_network_session_needs_udid():
+    import pytest
+
+    from device import PhoneSession
+
+    with pytest.raises(ValueError):
+        PhoneSession(host="100.1.2.3")
+    s = PhoneSession(udid="ABC", host="100.1.2.3")
+    assert s.host == "100.1.2.3" and s.udid == "ABC"
