@@ -19,9 +19,11 @@ other state live in a free hosted Turso database (step 1).
 
 The server creates its tables on first start.
 
-## 2. Google: Gemini key + Gmail access
+## 2. AI key (Claude) + Gmail access
 
-**Gemini:** go to **aistudio.google.com** → *Get API key* → create a key. That's `GEMINI_API_KEY`.
+**Claude:** go to **console.anthropic.com** → *Billing* → add credits → *API keys* → create a key. That's `ANTHROPIC_API_KEY` (paid; about 2¢ per text on Opus 5.5).
+
+**Gemini (optional, free backup):** go to **aistudio.google.com** → *Get API key*. That's `GEMINI_API_KEY`. It's only used if Claude fails, e.g. when credits run out.
 (On the free tier, Google may use your prompts, including email snippets, to improve its products.)
 
 **Gmail API:**
@@ -72,7 +74,8 @@ The server creates its tables on first start.
    | `AGENT_KEY`, `HELPER_KEY` | from step 1 above |
    | `MY_EMAIL` | your Gmail address |
    | `TIMEZONE` | e.g. `America/Los_Angeles` |
-   | `GEMINI_API_KEY` | from section 2 |
+   | `ANTHROPIC_API_KEY` | from section 2 |
+   | `GEMINI_API_KEY` | from section 2 (optional backup) |
    | `GITHUB_TOKEN`, `GITHUB_REPO` | from section 3A (`GITHUB_REPO` is `YOU/agent-generated-code`) |
    | `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN` | from section 1 |
    | `GMAIL_TOKEN_JSON` | open `server	oken.json` in Notepad and paste **the whole contents** |

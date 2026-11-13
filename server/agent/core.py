@@ -124,7 +124,7 @@ class Agent:
         if not text:
             return ""
         if self.llm is None:
-            return "My AI brain isn't set up yet (GEMINI_API_KEY is missing on the server)."
+            return "My AI brain isn't set up yet (ANTHROPIC_API_KEY is missing on the server)."
 
         turn = int(self.db.get("turn", 0)) + 1
         self.db.set("turn", turn)
@@ -138,7 +138,7 @@ class Agent:
                 lambda name, args: self._run_tool(name, args, ctx),
             )
         except LLMError as exc:
-            log.warning("gemini error: %s", exc)
+            log.warning("ai error: %s", exc)
             return NO_BRAIN
         self.db.add_message("model", reply, self.now())
         self._maybe_learn_style()

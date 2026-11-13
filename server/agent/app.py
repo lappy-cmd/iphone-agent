@@ -24,10 +24,21 @@ def build_agent(settings: Settings) -> Agent:
     from .geo import CensusGeocoder, ChainGeocoder, IPLocator, Nominatim
 
     llm = gmail = github = None
+    claude = gemini = None
+    if settings.anthropic_api_key:
+        from .llm import ClaudeLLM
+
+        claude = ClaudeLLM(settings.anthropic_api_key, settings.claude_model)
     if settings.gemini_api_key:
         from .llm import GeminiLLM
 
-        llm = GeminiLLM(settings.gemini_api_key, settings.gemini_model)
+        gemini = GeminiLLM(settings.gemini_api_key, settings.gemini_model)
+    if claude and gemini:
+        from .llm import FallbackLLM
+
+        llm = FallbackLLM(claude, gemini, log.warning)
+    else:
+        llm = claude or gemini
     if settings.my_email:
         from .gmail import Gmail
 

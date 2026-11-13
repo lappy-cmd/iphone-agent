@@ -25,7 +25,9 @@ class Settings:
     my_email: str = ""
     notify_email: str = ""  # where reminder/status emails go (an @icloud.com address is push); default my_email
     timezone: str = "America/Los_Angeles"
-    gemini_api_key: str = ""
+    anthropic_api_key: str = ""
+    claude_model: str = "claude-opus-5-5"
+    gemini_api_key: str = ""  # optional backup if Claude fails (or the only AI if no Claude key)
     gemini_model: str = "gemini-3.8-flash"
     db_path: str = "agent.db"
     turso_url: str = ""  # set to use a hosted Turso database instead of the db_path file
@@ -58,6 +60,8 @@ class Settings:
             owner_phone=e("OWNER_PHONE", ""),
             voice_poll_seconds=int(e("VOICE_POLL_SECONDS", "5")),
             timezone=e("TIMEZONE", "America/Los_Angeles"),
+            anthropic_api_key=e("ANTHROPIC_API_KEY", ""),
+            claude_model=e("CLAUDE_MODEL", "claude-opus-5-5"),
             gemini_api_key=e("GEMINI_API_KEY", ""),
             gemini_model=e("GEMINI_MODEL", "gemini-3.8-flash"),
             db_path=e("DB_PATH", "agent.db"),
