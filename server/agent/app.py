@@ -22,6 +22,7 @@ TICK_SECONDS = 30
 def build_agent(settings: Settings) -> Agent:
     """Wire real services; anything not configured is left as None and reported when used."""
     from .geo import CensusGeocoder, ChainGeocoder, IPLocator, Nominatim
+    from .web import Web
 
     llm = gmail = github = None
     claude = gemini = None
@@ -71,6 +72,7 @@ def build_agent(settings: Settings) -> Agent:
         github=github,
         telegram=telegram,
         selfrepo=selfrepo,
+        web=Web(),
     )
 
 
