@@ -28,6 +28,8 @@ class Settings:
     telegram_bot_token: str = ""  # from @BotFather; turns on Telegram texting
     telegram_owner_id: str = ""  # your numeric Telegram user ID (the bot tells you on first message)
     public_url: str = ""  # this server's https URL, for the Telegram webhook (Render sets RENDER_EXTERNAL_URL)
+    self_repo: str = ""  # "owner/repo" of this agent's own code, for change_own_code
+    self_github_token: str = ""  # token with Contents read/write + Actions read on self_repo
     anthropic_api_key: str = ""
     claude_model: str = "claude-opus-5-5"
     gemini_api_key: str = ""  # optional backup if Claude fails (or the only AI if no Claude key)
@@ -66,6 +68,8 @@ class Settings:
             telegram_bot_token=e("TELEGRAM_BOT_TOKEN", ""),
             telegram_owner_id=e("TELEGRAM_OWNER_ID", ""),
             public_url=e("PUBLIC_URL", "") or e("RENDER_EXTERNAL_URL", ""),
+            self_repo=e("SELF_REPO", ""),
+            self_github_token=e("SELF_GITHUB_TOKEN", ""),
             anthropic_api_key=e("ANTHROPIC_API_KEY", ""),
             claude_model=e("CLAUDE_MODEL", "claude-opus-5-5"),
             gemini_api_key=e("GEMINI_API_KEY", ""),

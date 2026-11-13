@@ -28,6 +28,10 @@ services:
         sync: false
       - key: TELEGRAM_OWNER_ID
         sync: false
+      - key: SELF_REPO
+        sync: false
+      - key: SELF_GITHUB_TOKEN
+        sync: false
       - key: ANTHROPIC_API_KEY
         sync: false
       - key: GEMINI_API_KEY

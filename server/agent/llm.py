@@ -37,6 +37,35 @@ CODE_SCHEMA = {
 }
 
 
+PICK_SCHEMA = {
+    "type": "object",
+    "properties": {"paths": {"type": "array", "items": {"type": "string"}}},
+    "required": ["paths"],
+    "additionalProperties": False,
+}
+
+EDIT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "summary": {"type": "string"},
+        "commit_message": {"type": "string"},
+        "files": CODE_SCHEMA["properties"]["files"],
+    },
+    "required": ["summary", "commit_message", "files"],
+    "additionalProperties": False,
+}
+
+SELF_EDIT_RULES = (
+    "You are changing the source code of a texting AI agent: a FastAPI server in server/agent "
+    "(core.py = behaviour and tools, persona.py = system prompt and tool list, llm.py = AI backends), "
+    "tests in server/tests, a Windows laptop location helper in helper/. The change goes live "
+    "automatically only if all tests pass, so keep existing tests passing and add or update tests "
+    "for new behaviour. Never weaken security: keep the owner-only checks, confirmations, key "
+    "checks and secret handling. Never print, log or send secrets. Keep changes minimal and in the "
+    "existing style."
+)
+
+
 def _jsonable(value: Any) -> dict:
     """Function responses must be JSON objects."""
     try:
@@ -84,6 +113,40 @@ class _Tasks:
             "the messages, only the style."
         )
         return self._generate(prompt)
+
+    def choose_files(self, request: str, paths: list[str]) -> list[str]:
+        """Pick the repo files needed to make a change to the agent's own code."""
+        prompt = (
+            f"{SELF_EDIT_RULES}\n\nRequested change:\n{request}\n\nRepository files:\n"
+            + "\n".join(paths)
+            + '\n\nReturn JSON {"paths": [...]} with the files you need to read to make this change '
+            "(the ones to edit, their tests, and anything needed to understand them). At most 12."
+        )
+        picked = self._json(prompt, PICK_SCHEMA).get("paths") or []
+        return [p for p in picked if p in paths][:12]
+
+    def edit_code(self, request: str, files: dict[str, str]) -> dict:
+        """Return {summary, commit_message, files: [{path, content}]} with FULL new contents."""
+        listing = "\n\n".join(f"=== {path} ===\n{text}" for path, text in files.items())
+        prompt = (
+            f"{SELF_EDIT_RULES}\n\nRequested change:\n{request}\n\nCurrent files:\n\n{listing}"
+            "\n\nReturn JSON with: summary (1-2 plain sentences for a text message), commit_message, "
+            "and files = every file you change or create, each with its COMPLETE new content (not a "
+            "diff). Leave out files you don't change."
+        )
+        d = self._json(prompt, EDIT_SCHEMA)
+        changed = [
+            {"path": str(f.get("path", "")), "content": str(f.get("content", ""))}
+            for f in d.get("files") or []
+            if f.get("path")
+        ]
+        if not changed:
+            raise LLMError("no files changed")
+        return {
+            "summary": str(d.get("summary") or "").strip(),
+            "commit_message": str(d.get("commit_message") or "agent: self edit").strip()[:200],
+            "files": changed,
+        }
 
     def generate_code(self, request: str) -> dict:
         prompt = (
@@ -343,3 +406,9 @@ class FallbackLLM:
 
     def generate_code(self, request):
         return self._either("generate_code", request)
+
+    def choose_files(self, request, paths):
+        return self._either("choose_files", request, paths)
+
+    def edit_code(self, request, files):
+        return self._either("edit_code", request, files)

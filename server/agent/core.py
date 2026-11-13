@@ -16,6 +16,7 @@ from .geo import GeoError, parse_coordinates
 from .github import GitHubError
 from .gmail import GmailAuthError, GmailError
 from .llm import LLMError
+from .selfedit import SelfRepoError
 from .persona import TOOLS, is_ours, mark, system_prompt
 
 log = logging.getLogger("agent")
@@ -55,6 +56,7 @@ class Agent:
         iplocator=None,
         github=None,
         telegram=None,
+        selfrepo=None,
         clock: Callable[[], datetime] = utcnow,
         background: Callable[[Callable[[], None]], None] = _threaded,
         sleep: Callable[[float], None] = time.sleep,
@@ -67,6 +69,7 @@ class Agent:
         self.iplocator = iplocator
         self.github = github
         self.telegram = telegram
+        self.selfrepo = selfrepo
         self._tg_lock = threading.Lock()  # answer Telegram messages one at a time, in order
         self.clock = clock
         self.background = background
@@ -535,6 +538,11 @@ class Agent:
             if not self.helper_online():
                 return self._helper_offline()
             return self._run_helper("set", {"lat": p["lat"], "lon": p["lon"], "label": p["label"]})
+        if pending["kind"] == "self_edit":
+            if self.selfrepo is None:
+                return {"error": "Self-editing isn't set up (SELF_GITHUB_TOKEN / SELF_REPO missing on the server)."}
+            self.background(lambda: self._self_edit(p["request"]))
+            return {"status": "started; the user gets a text when the change is live or if it fails"}
         return {"error": "unknown pending action"}
 
     def _tool_cancel_pending(self, ctx: dict) -> dict:
@@ -599,6 +607,62 @@ class Agent:
 
         self.background(work)
         return {"status": "started; the user gets a text with the GitHub link when it's ready"}
+
+    # ---- changing its own code
+    SELF_EDIT_POLL_SECONDS = 20
+    SELF_EDIT_MAX_WAIT_SECONDS = 25 * 60
+
+    def _tool_change_own_code(self, ctx: dict, request: str) -> dict:
+        if self.selfrepo is None:
+            return {"error": "Self-editing isn't set up (SELF_GITHUB_TOKEN / SELF_REPO missing on the server)."}
+        request = request.strip()[:2000]
+        self._prepare("self_edit", {"request": request, "summary": f"change my own code: {request}"}, ctx)
+        return {"status": "prepared; tell the user what you'll change and ask them to confirm"}
+
+    def _self_edit(self, request: str) -> None:
+        """Background: write the change on a branch, wait for the tests, merge to main if they pass."""
+        repo, llm = self.selfrepo, self.llm
+        try:
+            base = repo.head()
+            paths = repo.list_files(base)
+            known = set(paths)
+            picked = [p for p in llm.choose_files(request, paths) if p in known][:12]
+            files = {path: repo.read(path, base) for path in picked}
+            edit = llm.edit_code(request, files)
+            stamp = self.local(self.now()).strftime("%Y%m%d-%H%M%S")
+            branch = f"self-edit/{stamp}"
+            message = f"{edit['commit_message']}\n\nRequested by text: {request}"
+            sha = repo.commit_branch(base, edit["files"], message, branch)
+        except (LLMError, SelfRepoError) as exc:
+            log.warning("self edit failed: %s", exc)
+            self.notify(f"I couldn't make that change: {exc}")
+            return
+        changed = ", ".join(f["path"] for f in edit["files"][:6])
+        log.info("self edit on %s: %s", branch, changed)
+        waited = 0
+        status, url = "pending", ""
+        while waited <= self.SELF_EDIT_MAX_WAIT_SECONDS:
+            self.sleep(self.SELF_EDIT_POLL_SECONDS)
+            waited += self.SELF_EDIT_POLL_SECONDS
+            try:
+                status, url = repo.tests(sha)
+            except SelfRepoError as exc:
+                log.warning("checking self edit tests failed: %s", exc)
+                continue
+            if status != "pending":
+                break
+        if status != "success":
+            why = "the tests failed" if status == "failure" else "the tests didn't finish in time"
+            self.notify(f"I didn't apply that change because {why}. Nothing changed.\n{edit['summary']}\n{url}".strip())
+            return
+        try:
+            repo.merge(branch, f"Merge {branch}: {edit['commit_message']}")
+        except SelfRepoError as exc:
+            self.notify(f"Tests passed but merging failed ({exc}), so nothing changed.")
+            return
+        repo.delete_branch(branch)
+        self.notify(f"Done, tests passed: {edit['summary']}\nChanged: {changed}\n"
+                    "I'll be on the new version in a few minutes.")
 
     # ------------------------------------------------------------------ laptop helper API
     def helper_poll(self) -> dict | None:

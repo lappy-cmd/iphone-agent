@@ -52,6 +52,11 @@ def build_agent(settings: Settings) -> Agent:
         from .telegram import Telegram
 
         telegram = Telegram(settings.telegram_bot_token)
+    selfrepo = None
+    if settings.self_repo and settings.self_github_token:
+        from .selfedit import SelfRepo
+
+        selfrepo = SelfRepo(settings.self_github_token, settings.self_repo)
     if settings.github_token and settings.github_repo:
         from .github import GitHub
 
@@ -65,6 +70,7 @@ def build_agent(settings: Settings) -> Agent:
         iplocator=IPLocator(),
         github=github,
         telegram=telegram,
+        selfrepo=selfrepo,
     )
 
 

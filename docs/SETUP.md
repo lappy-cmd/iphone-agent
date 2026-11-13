@@ -256,3 +256,17 @@ Test at home first (phone unplugged, same Wi-Fi), then on cellular. If the phone
 the connection can drop; the helper reconnects and re-applies the location, but iOS may show the real
 location for a moment. Keep Tailscale connected on the phone (Settings → VPN → Tailscale → Connect On Demand). If the phone
 restarts, unlock it once before the helper can reach it.
+
+## 10. Let the agent change its own code
+
+Text it e.g. "change yourself so your replies are shorter". It asks you to confirm, writes the change on a
+`self-edit/...` branch, GitHub runs the tests (`.github/workflows/tests.yml`), and only if they pass it
+merges into `main` (Render then redeploys). You get a text either way. It can't edit `.github/`,
+`render.yaml` or secret files.
+
+1. GitHub → Settings → Developer settings → **Fine-grained tokens** → *Generate new token*.
+   Repository access: **Only select repositories** → `iphone-agent`. Permissions: **Contents: Read and
+   write**, **Actions: Read-only**. Copy the token.
+2. In Render → Environment add `SELF_REPO` = `lappy-cmd/iphone-agent` and `SELF_GITHUB_TOKEN` = the token.
+3. Check the **Actions** tab on GitHub shows the `tests` workflow passing on `main`.
+
