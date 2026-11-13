@@ -44,6 +44,13 @@ class Driver:
         self.current: tuple[float, float] | None = None
         self.connected = False
         self.sent_at = 0.0
+        self._link: asyncio.Lock | None = None  # one coroutine at a time touches the phone link
+
+    @property
+    def link(self) -> asyncio.Lock:
+        if self._link is None:  # created lazily so it binds to the running event loop
+            self._link = asyncio.Lock()
+        return self._link
 
     def target(self) -> tuple[float, float] | None:
         if self.traj is not None:
@@ -55,6 +62,10 @@ class Driver:
         return self.pin
 
     async def _apply(self) -> None:
+        async with self.link:
+            await self._apply_locked()
+
+    async def _apply_locked(self) -> None:
         if not self.connected:
             await self.session.open()
             self.connected = True
@@ -65,9 +76,10 @@ class Driver:
             self.current, self.sent_at = pt, self.clock()
 
     async def _drop(self) -> None:
-        self.connected = False
-        self.current = None
-        await self.session.close()
+        async with self.link:
+            self.connected = False
+            self.current = None
+            await self.session.close()
 
     async def step(self) -> bool:
         """Push the current point to the phone. False if the link is down (caller backs off)."""
@@ -104,7 +116,8 @@ class Driver:
                 return True, detail
             if action == "clear":
                 self.pin = self.traj = None
-                await self.session.clear()
+                async with self.link:
+                    await self.session.clear()
                 await self._drop()
                 return True, "cleared"
             return False, f"unknown action {action}"

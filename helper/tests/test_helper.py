@@ -134,3 +134,38 @@ def test_network_session_needs_udid():
         PhoneSession(host="100.1.2.3")
     s = PhoneSession(udid="ABC", host="100.1.2.3")
     assert s.host == "100.1.2.3" and s.udid == "ABC"
+
+
+class SlowPhone(FakePhone):
+    """Opening takes a while, and only one connection may exist (like the real userspace tunnel)."""
+
+    def __init__(self):
+        super().__init__()
+        self.opening = 0
+        self.opens = 0
+
+    async def open(self):
+        self.opening += 1
+        try:
+            if self.opening > 1:
+                raise RuntimeError("A userspace tunnel is already active in this process")
+            await asyncio.sleep(0.05)
+            self.opens += 1
+            self.is_open = True
+        finally:
+            self.opening -= 1
+
+
+def test_command_and_drive_loop_never_open_twice_at_once():
+    phone = SlowPhone()
+    d = Driver(phone, clock=Clock())
+
+    async def scenario():
+        cmd = asyncio.create_task(d.handle({"action": "set", "payload": {"lat": 1, "lon": 2}}))
+        await asyncio.sleep(0)  # the command has set the pin and is now opening the link...
+        stepped = await d.step()  # ...while the drive loop wakes up and wants the link too
+        return await cmd, stepped
+
+    (ok, detail), stepped = run(scenario())
+    assert ok and detail == "set" and stepped
+    assert phone.opens == 1 and phone.points[-1] == (1, 2)
