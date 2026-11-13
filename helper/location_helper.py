@@ -162,7 +162,7 @@ async def amain(args) -> None:
 
     from device import DryRunSession, PhoneSession
 
-    session = DryRunSession() if args.dry_run else PhoneSession(args.udid, args.host)
+    session = DryRunSession() if args.dry_run else PhoneSession(args.udid, args.host, args.port)
     driver = Driver(session)
     http = httpx.Client(
         base_url=args.server.rstrip("/"), headers={"X-Helper-Key": args.key}, timeout=15
@@ -197,9 +197,10 @@ def save_env_value(path: str, key: str, value: str) -> None:
 async def setup_remote(udid: str | None) -> None:
     from device import enable_network_access
 
-    udid = await enable_network_access(udid)
+    udid, port = await enable_network_access(udid)
     save_env_value(ENV_PATH, "PHONE_UDID", udid)
-    log.info("network access enabled and PHONE_UDID saved to helper/.env")
+    save_env_value(ENV_PATH, "PHONE_PORT", str(port))
+    log.info("wireless pairing ready; PHONE_UDID and PHONE_PORT (%d) saved to helper/.env", port)
     log.info("now add PHONE_HOST=<your iPhone's Tailscale IP> to helper/.env")
 
 
@@ -224,6 +225,8 @@ def main() -> None:
                     help="the phone's ID (needed for --host; --setup-remote saves it)")
     ap.add_argument("--host", default=os.environ.get("PHONE_HOST"),
                     help="connect over the network to this phone IP (its Tailscale 100.x address)")
+    ap.add_argument("--port", type=int, default=int(os.environ.get("PHONE_PORT") or 49152),
+                    help="the phone's wireless developer port (--setup-remote saves it)")
     ap.add_argument("--usb", action="store_true", help="ignore PHONE_HOST and use the cable")
     ap.add_argument("--setup-remote", action="store_true",
                     help="one time, phone plugged in: allow network connections and save PHONE_UDID")

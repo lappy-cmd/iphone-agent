@@ -233,7 +233,7 @@ browsing data. Text `where am i?` with the VPN off, then on, and compare the IP 
 - [ ] `what's in my email?` and `remind me to test in 5 minutes` work
 - [ ] Afterwards: stop the helper and turn Developer Mode off
 
-## 9. Change location from anywhere (Tailscale, experimental)
+## 9. Change location from anywhere (Tailscale)
 
 The laptop stays on at home; the phone connects back to it through Tailscale (free private network).
 
@@ -245,6 +245,7 @@ The laptop stays on at home; the phone connects back to it through Tailscale (fr
    cd iphone-agent\helper
    .\.venv\Scripts\python location_helper.py --setup-remote
    ```
+   This creates Apple's wireless developer pairing (no prompt) and saves `PHONE_UDID` and `PHONE_PORT`.
    Then add `PHONE_HOST=100.x.y.z` (the iPhone's Tailscale address) to `helper\.env`.
 3. **Keep the laptop awake on the charger:**
    `powercfg /change standby-timeout-ac 0` and `powercfg /change hibernate-timeout-ac 0`.
@@ -253,4 +254,5 @@ The laptop stays on at home; the phone connects back to it through Tailscale (fr
 
 Test at home first (phone unplugged, same Wi-Fi), then on cellular. If the phone locks or switches networks
 the connection can drop; the helper reconnects and re-applies the location, but iOS may show the real
-location for a moment. If it never connects over Tailscale, Apple isn't allowing it on that network: use USB.
+location for a moment. Keep Tailscale connected on the phone (Settings → VPN → Tailscale → Connect On Demand). If the phone
+restarts, unlock it once before the helper can reach it.
