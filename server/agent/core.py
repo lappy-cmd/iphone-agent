@@ -54,6 +54,7 @@ class Agent:
         geocoder=None,
         iplocator=None,
         github=None,
+        telegram=None,
         clock: Callable[[], datetime] = utcnow,
         background: Callable[[Callable[[], None]], None] = _threaded,
         sleep: Callable[[float], None] = time.sleep,
@@ -65,6 +66,8 @@ class Agent:
         self.geocoder = geocoder
         self.iplocator = iplocator
         self.github = github
+        self.telegram = telegram
+        self._tg_lock = threading.Lock()  # answer Telegram messages one at a time, in order
         self.clock = clock
         self.background = background
         self.sleep = sleep
@@ -108,8 +111,57 @@ class Agent:
                 self.db.set("imessage_outbox", [])
         return out
 
+    # ------------------------------------------------------------------ Telegram
+    def telegram_update(self, update: dict) -> None:
+        """One Telegram webhook update. Only the owner's private chat is answered."""
+        msg = update.get("message") or {}
+        chat = (msg.get("chat") or {}).get("id")
+        sender = (msg.get("from") or {}).get("id")
+        text = (msg.get("text") or "").strip()
+        if self.telegram is None or chat is None or sender is None:
+            return
+        if not self.db.mark_seen(f"tg:{update.get('update_id')}"):
+            return  # Telegram re-sent an update we already handled
+        if not self.s.telegram_owner_id:
+            self.telegram.send(chat, f"Hi! Your Telegram ID is {sender}. Put it in Render as "
+                                     "TELEGRAM_OWNER_ID, then text me again.")
+            return
+        if str(sender) != str(self.s.telegram_owner_id) or (msg.get("chat") or {}).get("type") != "private":
+            log.info("ignoring a Telegram message from someone else")
+            return
+        self.db.set("telegram_chat", chat)
+        if text in ("", "/start"):
+            if text == "/start":
+                self.telegram.send(chat, "Hey! Text me anything.")
+            return
+        with self._tg_lock:
+            done = threading.Event()
+
+            def keep_typing() -> None:
+                while not done.is_set():
+                    try:
+                        self.telegram.typing(chat)
+                    except Exception:
+                        return
+                    done.wait(4)  # Telegram shows "typing..." for about 5s
+
+            _threaded(keep_typing)  # always a real thread: it runs until the reply is ready
+            try:
+                answer = self.reply(text)
+            finally:
+                done.set()
+            if answer:
+                self.telegram.send(chat, answer)
+
     def notify(self, text: str) -> None:
-        """Proactive text: iMessage (Mac bridge) if it's running, else Google Voice, else email."""
+        """Proactive text: Telegram, else iMessage (Mac bridge), else Google Voice, else email."""
+        chat = self.db.get("telegram_chat")
+        if self.telegram is not None and chat:
+            try:
+                self.telegram.send(chat, text)
+                return
+            except Exception:
+                log.exception("telegram notify failed, trying the other routes")
         if self.imessage_online():
             with self._lock:
                 self.db.set("imessage_outbox", (self.db.get("imessage_outbox") or []) + [text])

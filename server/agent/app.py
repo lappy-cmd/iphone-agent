@@ -47,6 +47,11 @@ def build_agent(settings: Settings) -> Agent:
                 fh.write(settings.gmail_token_json)
 
         gmail = Gmail(settings.gmail_token_path, settings.my_email, settings.notify_email)
+    telegram = None
+    if settings.telegram_bot_token:
+        from .telegram import Telegram
+
+        telegram = Telegram(settings.telegram_bot_token)
     if settings.github_token and settings.github_repo:
         from .github import GitHub
 
@@ -59,6 +64,7 @@ def build_agent(settings: Settings) -> Agent:
         geocoder=ChainGeocoder(CensusGeocoder(), Nominatim()),
         iplocator=IPLocator(),
         github=github,
+        telegram=telegram,
     )
 
 
@@ -98,6 +104,12 @@ def create_app(agent: Agent, run_scheduler: bool = True) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         if run_scheduler:
+            if agent.telegram is not None and agent.s.public_url:
+                try:
+                    agent.telegram.set_webhook(agent.s.public_url.rstrip("/") + "/telegram/webhook")
+                    log.info("telegram webhook set")
+                except Exception as exc:
+                    log.error("telegram webhook setup failed: %s", exc)
             threading.Thread(target=scheduler, daemon=True).start()
             if agent.voice_enabled():
                 threading.Thread(target=voice_poller, daemon=True).start()
@@ -114,6 +126,7 @@ def create_app(agent: Agent, run_scheduler: bool = True) -> FastAPI:
         return {
             "ok": True,
             "helper_online": agent.helper_online(),
+            "telegram": agent.telegram is not None,
             "imessage_online": agent.imessage_online(),
             "voice": agent.voice_status,
         }
@@ -138,6 +151,18 @@ def create_app(agent: Agent, run_scheduler: bool = True) -> FastAPI:
     @app.get("/imessage/outbox", dependencies=[Depends(agent_auth)])
     def imessage_outbox() -> dict:
         return {"messages": agent.imessage_outbox()}
+
+    @app.post("/telegram/webhook")
+    async def telegram_webhook(
+        request: Request, x_telegram_bot_api_secret_token: str | None = Header(default=None)
+    ) -> dict:
+        if agent.telegram is None:
+            raise HTTPException(status_code=404)
+        _check(x_telegram_bot_api_secret_token, agent.telegram.secret)
+        update = await request.json()
+        # Answer Telegram right away; the AI reply is sent separately when it's ready.
+        agent.background(lambda: agent.telegram_update(update))
+        return {"ok": True}
 
     @app.get("/helper/poll", dependencies=[Depends(helper_auth)])
     def helper_poll() -> dict:

@@ -96,7 +96,19 @@ The server creates its tables on first start.
 
 Updating the server later: push to GitHub and Render redeploys automatically. Your data is safe in Turso.
 
-## 5. Texting the AI (iMessage via your Mac, recommended)
+## 5. Texting the AI (Telegram, recommended)
+
+Free, instant, shows "typing…".
+
+1. In Telegram, message **@BotFather** → `/newbot` → pick a name. Copy the token it gives you.
+2. In Render → Environment, add `TELEGRAM_BOT_TOKEN` = that token. Save (it redeploys).
+3. Open your bot in Telegram and send "hi". It replies with your Telegram ID.
+4. In Render, add `TELEGRAM_OWNER_ID` = that number. Save, wait for the deploy, and text it again.
+5. Optional: delete `OWNER_PHONE` in Render to turn off Google Voice.
+
+Reminders and notifications also come through Telegram once you've texted the bot. `/health` shows `"telegram": true`.
+
+## 5-old. Texting the AI (iMessage via a Mac)
 
 The agent gets its own iMessage contact (blue bubbles, replies in seconds). The Mac stays plugged in, lid open, online.
 On a shared Mac, first add a separate macOS user ("Agent", System Settings → Users & Groups), do every step below
