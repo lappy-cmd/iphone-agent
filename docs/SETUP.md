@@ -98,7 +98,9 @@ Updating the server later: push to GitHub and Render redeploys automatically. Yo
 
 ## 5. Texting the AI (iMessage via your Mac, recommended)
 
-The agent gets its own iMessage contact (blue bubbles, replies in seconds). Your Mac stays plugged in and awake.
+The agent gets its own iMessage contact (blue bubbles, replies in seconds). The Mac stays plugged in, lid open, online.
+On a shared Mac, first add a separate macOS user ("Agent", System Settings → Users & Groups), do every step below
+as that user, then switch back with Fast User Switching and leave it logged in.
 
 1. **Apple ID for the agent:** create a new Apple ID (appleid.apple.com) and on the Mac sign into **Messages** with it.
    Its email is the agent's iMessage address. (Without a SIM it can't have its own phone number.)

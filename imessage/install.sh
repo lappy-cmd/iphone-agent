@@ -9,7 +9,8 @@ mkdir -p "$HOME/Library/LaunchAgents"
 sed "s#BRIDGE_DIR#$DIR#g" "$DIR/com.iphoneagent.bridge.plist" > "$DEST"
 launchctl unload "$DEST" 2>/dev/null || true
 launchctl load "$DEST"
-echo "Keeping the Mac awake (asks for your Mac password):"
-sudo pmset -a sleep 0 disksleep 0
-sudo pmset -a autorestart 1 2>/dev/null || true
+echo "Keeping the Mac awake while plugged in (asks for an admin password):"
+# -c = only on the charger, so a laptop still sleeps on battery / in a bag. Keep the lid open.
+sudo pmset -c sleep 0 disksleep 0
+sudo pmset -c autorestart 1 2>/dev/null || true
 echo "Done. Log: $DIR/bridge.log"
